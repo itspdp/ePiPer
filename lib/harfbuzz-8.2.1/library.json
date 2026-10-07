@@ -1,0 +1,9 @@
+{
+  "name": "harfbuzz",
+  "version": "8.2.1",
+  "build": {
+    "srcDir": ".",
+    "srcFilter": ["+<src/harfbuzz.cc>"],
+    "flags": ["-Isrc", "-DHB_NO_MT", "-DHB_TINY", "-DHAVE_FREETYPE"]
+  }
+}
