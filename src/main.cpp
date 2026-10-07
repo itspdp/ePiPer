@@ -4,7 +4,6 @@
 #include <GxEPD2_BW.h>
 #include <OpenFontRender.h>
 
-// Bring in the massive splash image array
 #include "splash.h"
 
 // ==========================================
@@ -32,28 +31,35 @@ GxEPD2_BW<GxEPD2_420_SE0420NQ04, GxEPD2_420_SE0420NQ04::HEIGHT> display(
 
 SPIClass sdSPI(FSPI);
 
-// ==========================================
-// 2. TEXT ENGINE (FreeType + HarfBuzz)
-// ==========================================
 OpenFontRender render;
 uint8_t* font_buffer = nullptr;
 
+// ==========================================
+// 2. HELPER FUNCTIONS
+// ==========================================
 void myDrawPixel(int32_t x, int32_t y, uint16_t color) {
     display.drawPixel(x, y, color);
 }
 
-void showBootScreen() {
-    display.setRotation(0); 
+// Fallback function to display errors on the e-paper using the built-in ASCII font
+void showErrorOnScreen(const char* errorMsg) {
+    Serial.println(errorMsg);
+    display.setRotation(0);
     display.firstPage();
     do {
         display.fillScreen(GxEPD_WHITE);
-        int x = (400 - LOGO_WIDTH) / 2;
-        int y = (300 - LOGO_HEIGHT) / 2;
-        display.drawBitmap(x, y, epipar_pi_logo, LOGO_WIDTH, LOGO_HEIGHT, GxEPD_BLACK);
+        display.setTextColor(GxEPD_BLACK);
+        display.setTextSize(2);
+        display.setCursor(20, 50);
+        display.print("SYSTEM ERROR:");
+        display.setCursor(20, 100);
+        display.print(errorMsg);
     } while (display.nextPage());
-    Serial.println("Boot screen drawn.");
 }
 
+// ==========================================
+// 3. STORAGE & DYNAMIC FONT ENGINE
+// ==========================================
 bool mountSDCard() {
     pinMode(SD_PWR, OUTPUT);
     digitalWrite(SD_PWR, HIGH);
@@ -61,25 +67,47 @@ bool mountSDCard() {
 
     sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
     if (!SD.begin(SD_CS, sdSPI, 4000000)) {
-        Serial.println("ERROR: SD Card Mount Failed!");
+        showErrorOnScreen("SD Card Mount Failed. Insert FAT32 Card.");
         return false;
     }
     return true;
 }
 
-bool initTextEngine() {
-    File fontFile = SD.open("/notodev.ttf", FILE_READ);
+bool loadFirstAvailableFont() {
+    File root = SD.open("/");
+    File file = root.openNextFile();
+    String fontFilename = "";
+
+    // Scan SD root for the first .ttf file
+    while (file) {
+        String filename = String(file.name());
+        if (!file.isDirectory() && (filename.endsWith(".ttf") || filename.endsWith(".TTF"))) {
+            fontFilename = "/" + filename;
+            file.close();
+            break;
+        }
+        file.close();
+        file = root.openNextFile();
+    }
+    
+    if (fontFilename == "") {
+        showErrorOnScreen("No .ttf file found on SD Card root.");
+        return false;
+    }
+
+    Serial.println("Auto-detected font: " + fontFilename);
+    File fontFile = SD.open(fontFilename.c_str(), FILE_READ);
     if (!fontFile) {
-        Serial.println("ERROR: Could not find /notodev.ttf on SD card!");
+        showErrorOnScreen("Found .ttf but failed to open it.");
         return false;
     }
 
     size_t fileSize = fontFile.size();
-    Serial.printf("Loading font size: %d bytes into PSRAM...\n", fileSize);
+    Serial.printf("Allocating %d bytes in PSRAM...\n", fileSize);
 
     font_buffer = (uint8_t*)heap_caps_malloc(fileSize, MALLOC_CAP_SPIRAM);
     if (font_buffer == nullptr) {
-        Serial.println("ERROR: PSRAM Allocation Failed!");
+        showErrorOnScreen("PSRAM Out of Memory! Font too large.");
         fontFile.close();
         return false;
     }
@@ -89,7 +117,7 @@ bool initTextEngine() {
 
     render.setSerial(Serial);
     if (render.loadFont(font_buffer, fileSize)) {
-        Serial.println("ERROR: FreeType failed to parse the font!");
+        showErrorOnScreen("FreeType failed to parse the font file.");
         return false;
     }
 
@@ -97,12 +125,12 @@ bool initTextEngine() {
     render.setFontColor(GxEPD_BLACK);
     render.setFontSize(48); 
     
-    Serial.println("SUCCESS: Text Engine Initialized!");
+    Serial.println("SUCCESS: Dynamic Font Engine Ready.");
     return true;
 }
 
 // ==========================================
-// 3. MAIN LIFECYCLE
+// 4. MAIN LIFECYCLE
 // ==========================================
 void setup() {
     Serial.begin(115200);
@@ -113,32 +141,28 @@ void setup() {
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, EPD_CS);
     display.init(115200, true, 2, false);
     
-    // 1. Draw the splash image from splash.h
-    showBootScreen();
+    // Draw Splash Screen
+    display.setRotation(0); 
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawBitmap((400 - LOGO_WIDTH) / 2, (300 - LOGO_HEIGHT) / 2, epipar_pi_logo, LOGO_WIDTH, LOGO_HEIGHT, GxEPD_BLACK);
+    } while (display.nextPage());
     
-    // 2. Mount SD and Init Text Engine
-    if (mountSDCard()) {
-        if (initTextEngine()) {
+    // Init System
+    if (mountSDCard() && loadFirstAvailableFont()) {
+        
+        display.setRotation(0);
+        display.firstPage();
+        do {
+            display.fillScreen(GxEPD_WHITE);
             
-            // 3. Draw Devanagari Text Test
-            display.setRotation(0);
-            display.firstPage();
-            do {
-                display.fillScreen(GxEPD_WHITE);
-                
-                render.setCursor(20, 50);
-                render.cprintf("ePiPer Reader");
-
-                // Test complex Conjuncts
-                render.setCursor(20, 120);
-                render.cprintf("क्ष त्र ज्ञ श्र");
-                
-                // Test Matras
-                render.setCursor(20, 190);
-                render.cprintf("क कि की कु कू");
-                
-            } while (display.nextPage());
-        }
+            // Use drawString instead of cprintf for UTF-8 safety
+            render.drawString("ePiPer Reader", 20, 50);
+            render.drawString("क्ष त्र ज्ञ श्र", 20, 120);
+            render.drawString("क कि की कु कू", 20, 190);
+            
+        } while (display.nextPage());
     }
 }
 
