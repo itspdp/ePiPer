@@ -159,6 +159,19 @@ void drawShapedText(const char* text, int start_x, int start_y) {
 }
 
 // ==========================================
+//  Boot Splash
+// ==========================================
+void showBootScreen() {
+    display.setRotation(0); 
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawBitmap((400 - LOGO_WIDTH) / 2, (300 - LOGO_HEIGHT) / 2, epipar_pi_logo, LOGO_WIDTH, LOGO_HEIGHT, GxEPD_BLACK);
+    } while (display.nextPage());
+    Serial.println("Boot screen drawn.");
+}
+
+// ==========================================
 // 4. MAIN LIFECYCLE
 // ==========================================
 void setup() {
@@ -170,6 +183,8 @@ void setup() {
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, EPD_CS);
     display.init(115200, true, 2, false);
     
+    showBootScreen();
+
     if (mountSDCard() && initRawEngine()) {
         display.setRotation(0);
         display.firstPage();
