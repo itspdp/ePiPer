@@ -4,7 +4,6 @@
 #include <GxEPD2_BW.h>
 #include <vector>
 
-// Raw engine headers
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include <hb.h>
@@ -45,25 +44,32 @@ GxEPD2_BW<GxEPD2_420_SE0420NQ04, GxEPD2_420_SE0420NQ04::HEIGHT> display(
 SPIClass sdSPI(FSPI);
 
 // ==========================================
-// 2. GLOBALS
+// 2. GLOBALS & STATE
 // ==========================================
-// Text Engine
 uint8_t* font_buffer = nullptr;
 FT_Library ft_library;
 FT_Face ft_face;
 hb_font_t *hb_font;
 
-// GUI State
 std::vector<String> bookList;
 int currentSelection = 0;
 bool inReadingMode = false;
-
-// Input State
-int lastRotA = HIGH;
 unsigned long lastButtonPress = 0;
 
+// Hardware Interrupt Rotary State
+volatile int encoderCount = 0;
+
+// Quadrature decoder lookup table for perfect debouncing
+void IRAM_ATTR readEncoder() {
+    static uint8_t old_AB = 3;
+    static int8_t enc_states[] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
+    old_AB <<= 2;
+    old_AB |= ((digitalRead(ROT_B) << 1) | digitalRead(ROT_A));
+    encoderCount += enc_states[(old_AB & 0x0f)];
+}
+
 // ==========================================
-// 3. HARDWARE INIT & ENGINE
+// 3. ENGINE & RENDERING
 // ==========================================
 void showError(const char* msg) {
     Serial.println(msg);
@@ -88,7 +94,6 @@ void showBootScreen() {
         display.fillScreen(GxEPD_WHITE);
         display.drawBitmap((400 - LOGO_WIDTH) / 2, (300 - LOGO_HEIGHT) / 2, epipar_pi_logo, LOGO_WIDTH, LOGO_HEIGHT, GxEPD_BLACK);
     } while (display.nextPage());
-    Serial.println("Boot screen drawn.");
 }
 
 bool mountSDCard() {
@@ -96,24 +101,16 @@ bool mountSDCard() {
     digitalWrite(SD_PWR, HIGH);
     delay(100);
     sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-    if (!SD.begin(SD_CS, sdSPI, 4000000)) {
-        showError("SD Mount Failed");
-        return false;
-    }
-    return true;
+    return SD.begin(SD_CS, sdSPI, 4000000);
 }
 
 bool initRawEngine() {
-    if (FT_Init_FreeType(&ft_library)) {
-        showError("FreeType Init Failed");
-        return false;
-    }
+    if (FT_Init_FreeType(&ft_library)) return false;
 
     File root = SD.open("/");
     File file = root.openNextFile();
     String fontFilename = "";
     
-    // Dynamically locate the first TrueType font
     while (file) {
         String filename = String(file.name());
         if (!file.isDirectory() && (filename.endsWith(".ttf") || filename.endsWith(".TTF"))) {
@@ -125,38 +122,23 @@ bool initRawEngine() {
         file = root.openNextFile();
     }
     
-    if (fontFilename == "") {
-        showError("No .ttf file found");
-        return false;
-    }
+    if (fontFilename == "") return false;
 
     File fontFile = SD.open(fontFilename.c_str(), FILE_READ);
     size_t fileSize = fontFile.size();
-    
     font_buffer = (uint8_t*)heap_caps_malloc(fileSize, MALLOC_CAP_SPIRAM);
-    if (!font_buffer) {
-        showError("PSRAM Allocation Failed");
-        fontFile.close();
-        return false;
-    }
     
     fontFile.read(font_buffer, fileSize);
     fontFile.close();
 
-    if (FT_New_Memory_Face(ft_library, font_buffer, fileSize, 0, &ft_face)) {
-        showError("Face Binding Failed");
-        return false;
-    }
-    FT_Set_Pixel_Sizes(ft_face, 0, 48); 
-
+    if (FT_New_Memory_Face(ft_library, font_buffer, fileSize, 0, &ft_face)) return false;
+    
     hb_font = hb_ft_font_create(ft_face, NULL);
     return true;
 }
 
-// ==========================================
-// 4. GUI & RENDER LAYERS
-// ==========================================
-void drawShapedText(const char* text, int start_x, int start_y) {
+// Added dynamic color parameter (for white text on black selection highlights)
+void drawShapedText(const char* text, int start_x, int start_y, uint16_t color = GxEPD_BLACK) {
     hb_buffer_t *hb_buffer = hb_buffer_create();
     hb_buffer_add_utf8(hb_buffer, text, -1, 0, -1);
     
@@ -185,7 +167,7 @@ void drawShapedText(const char* text, int start_x, int start_y) {
         for (unsigned int row = 0; row < bitmap->rows; ++row) {
             for (unsigned int col = 0; col < bitmap->width; ++col) {
                 if (bitmap->buffer[row * bitmap->pitch + col]) {
-                    display.drawPixel(x_pos + col, y_pos + row, GxEPD_BLACK);
+                    display.drawPixel(x_pos + col, y_pos + row, color);
                 }
             }
         }
@@ -195,13 +177,17 @@ void drawShapedText(const char* text, int start_x, int start_y) {
     hb_buffer_destroy(hb_buffer);
 }
 
+// ==========================================
+// 4. GUI & FILE EXPLORER
+// ==========================================
 void scanForBooks() {
     bookList.clear();
     File root = SD.open("/");
     File file = root.openNextFile();
     while (file) {
         String filename = file.name();
-        if (!file.isDirectory() && (filename.endsWith(".txt") || filename.endsWith(".TXT"))) {
+        // Added .md and .epub support to the scanner
+        if (!file.isDirectory() && (filename.endsWith(".txt") || filename.endsWith(".md") || filename.endsWith(".epub"))) {
             bookList.push_back(filename);
         }
         file.close();
@@ -211,67 +197,62 @@ void scanForBooks() {
 
 void drawLibraryMenu(bool partialRefresh = false) {
     display.setRotation(0);
+    if (partialRefresh) display.setPartialWindow(0, 0, 400, 300);
+    else display.setFullWindow();
     
-    // Use partial window to make rotary scrolling much faster
-    if (partialRefresh) {
-        display.setPartialWindow(0, 0, 400, 300);
-    } else {
-        display.setFullWindow();
-    }
+    // Scale HarfBuzz font down for UI Lists
+    FT_Set_Pixel_Sizes(ft_face, 0, 24); 
     
     display.firstPage();
     do {
         display.fillScreen(GxEPD_WHITE);
         display.fillRect(0, 0, 400, 40, GxEPD_BLACK);
-        display.setTextColor(GxEPD_WHITE);
-        display.setTextSize(2); 
-        display.setCursor(10, 12);
-        display.print("ePiPer Library");
+        
+        // Header
+        drawShapedText("ePiPer Library (ई-पाइपर)", 10, 28, GxEPD_WHITE);
         
         if (bookList.empty()) {
-            display.setTextColor(GxEPD_BLACK);
-            display.setCursor(10, 60);
-            display.print("No .txt files found on SD.");
+            drawShapedText("No books found on SD.", 10, 80);
             continue;
         }
 
-        display.setTextSize(2);
-        
-        // Scroll window logic
         int startIndex = 0;
-        if (currentSelection > 6) startIndex = currentSelection - 6; 
+        if (currentSelection > 5) startIndex = currentSelection - 5; 
 
-        for (int i = startIndex; i < (int)bookList.size() && i < startIndex + 7; i++) {
-            int y_pos = 60 + ((i - startIndex) * 35);
+        for (int i = startIndex; i < (int)bookList.size() && i < startIndex + 6; i++) {
+            // Y position acts as the text baseline
+            int y_pos = 80 + ((i - startIndex) * 40); 
             
             if (i == currentSelection) {
-                display.fillRoundRect(5, y_pos - 5, 390, 30, 4, GxEPD_BLACK);
-                display.setTextColor(GxEPD_WHITE);
+                // Highlight box must shift up to encompass the baseline
+                display.fillRoundRect(5, y_pos - 24, 390, 34, 4, GxEPD_BLACK);
+                drawShapedText(bookList[i].c_str(), 15, y_pos, GxEPD_WHITE);
             } else {
-                display.setTextColor(GxEPD_BLACK);
+                drawShapedText(bookList[i].c_str(), 15, y_pos, GxEPD_BLACK);
             }
-            
-            display.setCursor(15, y_pos);
-            display.print(bookList[i].c_str());
         }
     } while (display.nextPage());
 }
 
 void openBook() {
     inReadingMode = true;
-    display.setFullWindow(); // Force full refresh to clear menu ghosting
+    display.setFullWindow(); 
+    
+    // Scale HarfBuzz font back up for reading
+    FT_Set_Pixel_Sizes(ft_face, 0, 48); 
+    
     display.firstPage();
     do {
         display.fillScreen(GxEPD_WHITE);
-        display.setTextColor(GxEPD_BLACK);
-        display.setTextSize(2);
-        display.setCursor(10, 20);
-        display.print("Reading: ");
-        display.print(bookList[currentSelection].c_str());
+        drawShapedText("Reading:", 10, 50);
         
-        // Proof of Engine Capability
-        drawShapedText("क्ष त्र ज्ञ श्र", 20, 100);
-        drawShapedText("क कि की कु कू", 20, 180);
+        // Draw the book title dynamically using HarfBuzz
+        FT_Set_Pixel_Sizes(ft_face, 0, 36);
+        drawShapedText(bookList[currentSelection].c_str(), 10, 100);
+        
+        FT_Set_Pixel_Sizes(ft_face, 0, 48);
+        drawShapedText("क्ष त्र ज्ञ श्र", 20, 180);
+        drawShapedText("क कि की कु कू", 20, 250);
     } while (display.nextPage());
 }
 
@@ -281,14 +262,16 @@ void openBook() {
 void setup() {
     Serial.begin(115200);
     
-    // Setup Inputs
     pinMode(ROT_A, INPUT_PULLUP);
     pinMode(ROT_B, INPUT_PULLUP);
     pinMode(ROT_PUSH, INPUT_PULLUP);
     pinMode(BTN_MENU, INPUT_PULLUP);
     pinMode(BTN_EXIT, INPUT_PULLUP);
 
-    // Init E-Paper
+    // Bind strict hardware interrupts to the encoder pins
+    attachInterrupt(digitalPinToInterrupt(ROT_A), readEncoder, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ROT_B), readEncoder, CHANGE);
+
     pinMode(EPD_PWR, OUTPUT);
     digitalWrite(EPD_PWR, HIGH); 
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, EPD_CS);
@@ -298,30 +281,30 @@ void setup() {
     
     if (mountSDCard() && initRawEngine()) {
         scanForBooks();
-        drawLibraryMenu(false); // Initial full refresh
+        drawLibraryMenu(false); 
     }
 }
 
 void loop() {
-    // 1. Rotary Scroll Polling
-    int a = digitalRead(ROT_A);
-    int b = digitalRead(ROT_B);
-    
-    if (a == LOW && lastRotA == HIGH) {
+    // 1. Hardware Interrupt Rotary Polling
+    if (encoderCount >= 4) { // 4 phases per mechanical click
+        encoderCount = 0;
         if (!inReadingMode && !bookList.empty()) {
-            if (b == HIGH) {
-                currentSelection++;
-                if (currentSelection >= (int)bookList.size()) currentSelection = 0;
-            } else {
-                currentSelection--;
-                if (currentSelection < 0) currentSelection = bookList.size() - 1;
-            }
-            drawLibraryMenu(true); // Fast partial refresh for scrolling
+            currentSelection++;
+            if (currentSelection >= (int)bookList.size()) currentSelection = 0;
+            drawLibraryMenu(true); 
+        }
+    } 
+    else if (encoderCount <= -4) {
+        encoderCount = 0;
+        if (!inReadingMode && !bookList.empty()) {
+            currentSelection--;
+            if (currentSelection < 0) currentSelection = bookList.size() - 1;
+            drawLibraryMenu(true); 
         }
     }
-    lastRotA = a;
     
-    // 2. Push to Confirm
+    // 2. Center Push (Select)
     if (digitalRead(ROT_PUSH) == LOW && (millis() - lastButtonPress > 300)) {
         lastButtonPress = millis();
         if (!inReadingMode && !bookList.empty()) {
@@ -329,14 +312,23 @@ void loop() {
         }
     }
     
-    // 3. Exit Back to Menu
+    // 3. Exit Button (Back)
     if (digitalRead(BTN_EXIT) == LOW && (millis() - lastButtonPress > 300)) {
         lastButtonPress = millis();
         if (inReadingMode) {
             inReadingMode = false;
-            drawLibraryMenu(false); // Full refresh to wipe book ghosting
+            drawLibraryMenu(false); 
         }
     }
 
-    delay(2); // Tight debounce 
+    // 4. Menu Button Placeholder
+    if (digitalRead(BTN_MENU) == LOW && (millis() - lastButtonPress > 300)) {
+        lastButtonPress = millis();
+        if (!inReadingMode) {
+            // Future: Trigger Wi-Fi Server Mode here
+            Serial.println("Menu Button Pressed - Ready for Wi-Fi Server Trigger");
+        }
+    }
+
+    delay(10); 
 }
