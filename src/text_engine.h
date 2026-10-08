@@ -93,7 +93,8 @@ inline void drawShapedText(const char* text, int start_x, int start_y, uint16_t 
         FT_Bitmap* bitmap = &ft_face->glyph->bitmap;
         for (unsigned int row = 0; row < bitmap->rows; ++row) {
             for (unsigned int col = 0; col < bitmap->width; ++col) {
-                if (bitmap->buffer[row * bitmap->pitch + col]) {
+                // The "> 128" threshold kills the smudgy gray pixels!
+                if (bitmap->buffer[row * bitmap->pitch + col] > 128) { 
                     display.drawPixel(x_pos + col, y_pos + row, color);
                 }
             }

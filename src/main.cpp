@@ -21,12 +21,12 @@
 #define BTN_MENU      2
 #define BTN_EXIT      1
 
-// 2. Modular Includes (MUST come before instantiating extern variables)
+// 2. Modular Includes 
 #include "splash.h"
 #include "system_storage.h"
 #include "text_engine.h"
 
-// 3. Global Instantiations for Headers
+// 3. Global Instantiations
 GxEPD2_BW<GxEPD2_420_SE0420NQ04, GxEPD2_420_SE0420NQ04::HEIGHT> display(
     GxEPD2_420_SE0420NQ04(EPD_CS, EPD_DC, EPD_RES, EPD_BUSY)
 );
@@ -37,28 +37,27 @@ FT_Library ft_library;
 FT_Face ft_face;
 hb_font_t *hb_font;
 
-// 4. UI State
+// 4. UI & Pagination State
 int currentSelection = 0;
 bool inReadingMode = false;
 unsigned long lastButtonPress = 0;
 
-// Font Cycler State
 int fontSizes[] = {16, 24, 32, 48}; 
-int currentFontIndex = 2; // Defaults to 32px
+int currentFontIndex = 2; 
 
-void showError(const char* msg) {
-    Serial.println(msg);
+std::vector<uint32_t> pageOffsets;
+int currentPage = 0;
+
+// ==========================================
+// RENDERERS
+// ==========================================
+void deepCleanScreen() {
+    // The Ultimate Ghosting Killer: Flash Black, then White
     display.setFullWindow();
     display.firstPage();
-    do {
-        display.fillScreen(GxEPD_WHITE);
-        display.setTextColor(GxEPD_BLACK);
-        display.setTextSize(2);
-        display.setCursor(20, 50);
-        display.print("SYSTEM ERROR:");
-        display.setCursor(20, 100);
-        display.print(msg);
-    } while (display.nextPage());
+    do { display.fillScreen(GxEPD_BLACK); } while (display.nextPage());
+    display.firstPage();
+    do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
 }
 
 void showBootScreen() {
@@ -112,56 +111,99 @@ void drawLibraryMenu(bool partialRefresh = false) {
     } while (display.nextPage());
 }
 
-void openBook() {
-    inReadingMode = true;
-    display.setFullWindow(); 
-    display.clearScreen(); // Deep hardware wipe to fix E-Ink ghosting
-    
+void renderPage() {
     int activeFontSize = fontSizes[currentFontIndex];
     setFontSize(activeFontSize);
     
+    display.setFullWindow();
     display.firstPage();
     do {
         display.fillScreen(GxEPD_WHITE);
         
         String filePath = bookList[currentSelection];
         if (!filePath.startsWith("/")) filePath = "/" + filePath;
-
         File file = SD.open(filePath.c_str());
-        
-        if (!file) {
-            drawShapedText("Error reading file.", 10, 50);
-        } else if (filePath.endsWith(".epub") || filePath.endsWith(".EPUB")) {
-            drawShapedText("EPUB parser offline.", 10, 50);
-            drawShapedText("Requires Phase 4 caching.", 10, 90);
-            file.close();
-        } else {
+
+        if (file) {
+            // Jump to the saved byte offset for the current page
+            file.seek(pageOffsets[currentPage]);
+
             int max_width = 390; 
             int line_height = activeFontSize + (activeFontSize / 3);
             int x_pos = 10;
             int y_pos = activeFontSize + 10; 
+            bool isNewLine = true;
             
             while (file.available() && y_pos < 290) {
+                uint32_t currentOffset = file.position();
                 String word = file.readStringUntil(' '); 
-                if (word.length() == 0) continue;
                 
+                // 1. Detect Paragraph Breaks (\n) and Kill Boxes (\r)
+                bool paragraphBreak = false;
+                if (word.indexOf('\n') != -1) {
+                    paragraphBreak = true;
+                    word.replace("\n", "");
+                }
+                word.replace("\r", ""); 
+                
+                if (word.length() == 0 && !paragraphBreak) continue;
+                
+                // 2. Lightweight Markdown Parsing (Headers)
+                if (isNewLine && word.startsWith("#")) {
+                    setFontSize(activeFontSize + 12); // Boost font size
+                    line_height = (activeFontSize + 12) * 1.3;
+                    word = word.substring(1); // Strip the #
+                }
+
                 word += " "; 
                 int word_width = getTextWidth(word.c_str());
                 
-                if (x_pos + word_width > max_width) {
+                // 3. Word Wrap & Page Boundary Math
+                if (x_pos + word_width > max_width && x_pos > 10) {
                     x_pos = 10;
                     y_pos += line_height;
-                    if (y_pos >= 290) break; 
+                    if (y_pos >= 290) {
+                        // We ran out of screen! Save the offset for the NEXT page.
+                        if (currentPage + 1 >= (int)pageOffsets.size()) {
+                            pageOffsets.push_back(currentOffset);
+                        }
+                        break; 
+                    }
                 }
                 
                 drawShapedText(word.c_str(), x_pos, y_pos);
                 x_pos += word_width;
+                isNewLine = false;
+
+                // 4. Execute Paragraph Break
+                if (paragraphBreak) {
+                    x_pos = 10;
+                    y_pos += line_height;
+                    isNewLine = true;
+                    setFontSize(activeFontSize); // Reset font size
+                    line_height = activeFontSize + (activeFontSize / 3);
+                }
             }
             file.close();
         }
     } while (display.nextPage());
 }
 
+void openBook() {
+    inReadingMode = true;
+    deepCleanScreen(); // Kill ghosting
+    
+    // Reset pagination
+    pageOffsets.clear();
+    pageOffsets.push_back(0); // Page 0 starts at byte 0
+    currentPage = 0;
+    
+    renderPage();
+}
+
+// ==========================================
+// LIFECYCLE
+// ==========================================
 void setup() {
     Serial.begin(115200);
     
@@ -178,15 +220,9 @@ void setup() {
     
     showBootScreen();
     
-    if (mountSDCard()) {
-        if(initRawEngine()) {
-            scanForBooks();
-            drawLibraryMenu(false); 
-        } else {
-            showError("Text Engine Failed");
-        }
-    } else {
-        showError("SD Mount Failed");
+    if (mountSDCard() && initRawEngine()) {
+        scanForBooks();
+        drawLibraryMenu(false); 
     }
 }
 
@@ -197,7 +233,14 @@ void loop() {
     
         if (digitalRead(BTN_UP) == LOW) {
             lastButtonPress = currentMillis;
-            if (!inReadingMode && !bookList.empty()) {
+            if (inReadingMode) {
+                // PAGE BACKWARD
+                if (currentPage > 0) {
+                    currentPage--;
+                    deepCleanScreen();
+                    renderPage();
+                }
+            } else if (!bookList.empty()) {
                 currentSelection--;
                 if (currentSelection < 0) currentSelection = bookList.size() - 1;
                 drawLibraryMenu(true);
@@ -206,7 +249,14 @@ void loop() {
         
         if (digitalRead(BTN_DOWN) == LOW) {
             lastButtonPress = currentMillis;
-            if (!inReadingMode && !bookList.empty()) {
+            if (inReadingMode) {
+                // PAGE FORWARD
+                if (currentPage + 1 < (int)pageOffsets.size()) {
+                    currentPage++;
+                    deepCleanScreen();
+                    renderPage();
+                }
+            } else if (!bookList.empty()) {
                 currentSelection++;
                 if (currentSelection >= (int)bookList.size()) currentSelection = 0;
                 drawLibraryMenu(true);
@@ -224,7 +274,7 @@ void loop() {
             lastButtonPress = currentMillis;
             if (inReadingMode) {
                 inReadingMode = false;
-                display.clearScreen(); // Deep wipe before returning to menu
+                deepCleanScreen(); 
                 drawLibraryMenu(false); 
             }
         }
@@ -234,6 +284,7 @@ void loop() {
             if (inReadingMode) {
                 currentFontIndex++;
                 if (currentFontIndex > 3) currentFontIndex = 0;
+                // Re-calculate the whole book with the new font size
                 openBook(); 
             }
         }
