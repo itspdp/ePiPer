@@ -246,10 +246,25 @@ void openBook() {
     do {
         display.fillScreen(GxEPD_WHITE);
         
-        File file = SD.open(bookList[currentSelection].c_str());
+        // 1. Reconstruct the absolute path for the SD library
+        String filePath = bookList[currentSelection];
+        if (!filePath.startsWith("/")) {
+            filePath = "/" + filePath;
+        }
+
+        File file = SD.open(filePath.c_str());
+        
         if (!file) {
             drawShapedText("Error reading file.", 10, 50);
-        } else {
+        } 
+        // 2. Prevent binary gibberish from crashing the text engine
+        else if (filePath.endsWith(".epub") || filePath.endsWith(".EPUB")) {
+            drawShapedText("EPUB parser offline.", 10, 50);
+            drawShapedText("Requires Phase 4 caching.", 10, 90);
+            file.close();
+        } 
+        // 3. Render readable text files
+        else {
             int y_pos = 35;
             // Read lines until the screen is full
             while (file.available() && y_pos < 290) {
