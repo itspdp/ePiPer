@@ -21,7 +21,7 @@
 #define BTN_MENU      2
 #define BTN_EXIT      1
 
-// 2. Modular Includes 
+// 2. Modular Includes
 #include "splash.h"
 #include "system_storage.h"
 #include "text_engine.h"
@@ -42,7 +42,7 @@ int currentSelection = 0;
 bool inReadingMode = false;
 unsigned long lastButtonPress = 0;
 
-int fontSizes[] = {16, 24, 32, 48}; 
+int fontSizes[] = {20, 26, 34, 48}; 
 int currentFontIndex = 2; 
 
 std::vector<uint32_t> pageOffsets;
@@ -51,15 +51,6 @@ int currentPage = 0;
 // ==========================================
 // RENDERERS
 // ==========================================
-void deepCleanScreen() {
-    // The Ultimate Ghosting Killer: Flash Black, then White
-    display.setFullWindow();
-    display.firstPage();
-    do { display.fillScreen(GxEPD_BLACK); } while (display.nextPage());
-    display.firstPage();
-    do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
-}
-
 void showBootScreen() {
     display.setFullWindow();
     display.setRotation(0); 
@@ -125,7 +116,6 @@ void renderPage() {
         File file = SD.open(filePath.c_str());
 
         if (file) {
-            // Jump to the saved byte offset for the current page
             file.seek(pageOffsets[currentPage]);
 
             int max_width = 390; 
@@ -134,54 +124,73 @@ void renderPage() {
             int y_pos = activeFontSize + 10; 
             bool isNewLine = true;
             
-            while (file.available() && y_pos < 290) {
+            while (file.available()) {
                 uint32_t currentOffset = file.position();
-                String word = file.readStringUntil(' '); 
-                
-                // 1. Detect Paragraph Breaks (\n) and Kill Boxes (\r)
+                String word = "";
                 bool paragraphBreak = false;
-                if (word.indexOf('\n') != -1) {
-                    paragraphBreak = true;
-                    word.replace("\n", "");
-                }
-                word.replace("\r", ""); 
-                
-                if (word.length() == 0 && !paragraphBreak) continue;
-                
-                // 2. Lightweight Markdown Parsing (Headers)
-                if (isNewLine && word.startsWith("#")) {
-                    setFontSize(activeFontSize + 12); // Boost font size
-                    line_height = (activeFontSize + 12) * 1.3;
-                    word = word.substring(1); // Strip the #
+                bool hasSpace = false;
+
+                // 1. Precise Character Tokenizer (Fixes ignored line breaks)
+                while (file.available()) {
+                    char c = file.read();
+                    if (c == ' ') {
+                        hasSpace = true;
+                        break;
+                    } else if (c == '\n') {
+                        paragraphBreak = true;
+                        break;
+                    } else if (c != '\r') {
+                        word += c; 
+                    }
                 }
 
-                word += " "; 
-                int word_width = getTextWidth(word.c_str());
-                
-                // 3. Word Wrap & Page Boundary Math
-                if (x_pos + word_width > max_width && x_pos > 10) {
-                    x_pos = 10;
-                    y_pos += line_height;
+                if (word.length() == 0 && !paragraphBreak) continue;
+
+                // 2. Markdown Headers
+                if (isNewLine && word.startsWith("#")) {
+                    setFontSize(activeFontSize + 12);
+                    line_height = (activeFontSize + 12) * 1.3;
+                    word = word.substring(1); 
+                }
+
+                if (word.length() > 0) {
+                    // FIX: Calculate width WITHOUT the space to prevent premature wrapping
+                    int pure_word_width = getTextWidth(word.c_str());
+
+                    if (x_pos + pure_word_width > max_width && x_pos > 10) {
+                        x_pos = 10;
+                        y_pos += line_height;
+                    }
+
                     if (y_pos >= 290) {
-                        // We ran out of screen! Save the offset for the NEXT page.
                         if (currentPage + 1 >= (int)pageOffsets.size()) {
-                            pageOffsets.push_back(currentOffset);
+                            pageOffsets.push_back(currentOffset); 
                         }
                         break; 
                     }
+
+                    // Append space for actual drawing
+                    if (hasSpace) word += " ";
+                    drawShapedText(word.c_str(), x_pos, y_pos);
+                    x_pos += getTextWidth(word.c_str()); // Advance by full width
                 }
-                
-                drawShapedText(word.c_str(), x_pos, y_pos);
-                x_pos += word_width;
+
                 isNewLine = false;
 
-                // 4. Execute Paragraph Break
+                // 3. True Paragraph Breaks
                 if (paragraphBreak) {
                     x_pos = 10;
                     y_pos += line_height;
                     isNewLine = true;
-                    setFontSize(activeFontSize); // Reset font size
+                    setFontSize(activeFontSize); 
                     line_height = activeFontSize + (activeFontSize / 3);
+
+                    if (y_pos >= 290) {
+                        if (file.available() && currentPage + 1 >= (int)pageOffsets.size()) {
+                            pageOffsets.push_back(file.position());
+                        }
+                        break;
+                    }
                 }
             }
             file.close();
@@ -191,11 +200,9 @@ void renderPage() {
 
 void openBook() {
     inReadingMode = true;
-    deepCleanScreen(); // Kill ghosting
     
-    // Reset pagination
     pageOffsets.clear();
-    pageOffsets.push_back(0); // Page 0 starts at byte 0
+    pageOffsets.push_back(0); 
     currentPage = 0;
     
     renderPage();
@@ -234,10 +241,8 @@ void loop() {
         if (digitalRead(BTN_UP) == LOW) {
             lastButtonPress = currentMillis;
             if (inReadingMode) {
-                // PAGE BACKWARD
                 if (currentPage > 0) {
                     currentPage--;
-                    deepCleanScreen();
                     renderPage();
                 }
             } else if (!bookList.empty()) {
@@ -250,10 +255,8 @@ void loop() {
         if (digitalRead(BTN_DOWN) == LOW) {
             lastButtonPress = currentMillis;
             if (inReadingMode) {
-                // PAGE FORWARD
                 if (currentPage + 1 < (int)pageOffsets.size()) {
                     currentPage++;
-                    deepCleanScreen();
                     renderPage();
                 }
             } else if (!bookList.empty()) {
@@ -274,7 +277,6 @@ void loop() {
             lastButtonPress = currentMillis;
             if (inReadingMode) {
                 inReadingMode = false;
-                deepCleanScreen(); 
                 drawLibraryMenu(false); 
             }
         }
@@ -284,8 +286,13 @@ void loop() {
             if (inReadingMode) {
                 currentFontIndex++;
                 if (currentFontIndex > 3) currentFontIndex = 0;
-                // Re-calculate the whole book with the new font size
-                openBook(); 
+                
+                uint32_t savedOffset = pageOffsets[currentPage];
+                pageOffsets.clear();
+                pageOffsets.push_back(savedOffset);
+                currentPage = 0;
+                
+                renderPage(); 
             }
         }
     }
