@@ -25,9 +25,8 @@
 #define BTN_MENU      2
 #define BTN_EXIT      1
 
-// YOUR WI-FI CREDENTIALS HERE
-const char* WIFI_SSID = "Airtel_pran_2503";
-const char* WIFI_PASS = "Air@47479";
+const char* WIFI_SSID = "Your_WiFi_Name";
+const char* WIFI_PASS = "Your_WiFi_Password";
 
 // ==========================================
 // 2. MODULAR INCLUDES
@@ -35,7 +34,7 @@ const char* WIFI_PASS = "Air@47479";
 #include "splash.h"
 #include "system_storage.h"
 #include "text_engine.h"
-#include "wifi_manager.h" // Phase 5 Wireless Ecosystem
+#include "wifi_manager.h" 
 
 // ==========================================
 // 3. GLOBAL INSTANTIATIONS
@@ -69,18 +68,16 @@ int currentPage = 0;
 namespace UIManager {
     String currentTime = "12:00 PM"; 
 
-    bool isCharging() { return true; } // USB powered
-    int getBatteryPercentage() { return 100; } // Placeholder
+    bool isCharging() { return true; } 
+    int getBatteryPercentage() { return 100; } 
 
     void updateInternalClock() {
         struct tm timeinfo;
-        // Attempt to fetch true NTP-synced time from the RTC
         if (getLocalTime(&timeinfo, 10)) { 
             char timeBuf[10];
             strftime(timeBuf, sizeof(timeBuf), "%I:%M %p", &timeinfo);
             currentTime = String(timeBuf);
         } else {
-            // Fallback: Simulated offline clock
             unsigned long totalMinutes = millis() / 60000;
             int hours = (12 + (totalMinutes / 60)) % 12;
             if (hours == 0) hours = 12;
@@ -95,7 +92,6 @@ namespace UIManager {
         display.fillRect(0, 0, 400, 25, GxEPD_BLACK);
         setFontSize(14);
         
-        // Display IP address if connected, else status
         String wifiStr = isWifiConnected ? currentIP : "Wi-Fi: OFF";
         drawShapedText(wifiStr.c_str(), 10, 18, GxEPD_WHITE);
 
@@ -111,6 +107,14 @@ namespace UIManager {
         display.fillRect(0, 275, 400, 25, GxEPD_BLACK);
         setFontSize(14);
         
+        // CRITICAL FIX: Strip extensions from the display title to prevent missing glyph boxes
+        title.replace(".txt", "");
+        title.replace(".TXT", "");
+        title.replace(".md", "");
+        title.replace(".MD", "");
+        title.replace(".epub", "");
+        title.replace(".EPUB", "");
+
         if (title.length() > 25) title = title.substring(0, 22) + "...";
         drawShapedText(title.c_str(), 10, 293, GxEPD_WHITE);
 
@@ -160,11 +164,21 @@ void drawLibraryMenu(bool partialRefresh = false) {
 
         for (int i = startIndex; i < (int)bookList.size() && i < startIndex + visibleItems; i++) {
             int y_pos = 95 + ((i - startIndex) * 40); 
+            
+            // Clean extension for UI display
+            String displayName = bookList[i];
+            displayName.replace(".txt", "");
+            displayName.replace(".TXT", "");
+            displayName.replace(".md", "");
+            displayName.replace(".MD", "");
+            displayName.replace(".epub", "");
+            displayName.replace(".EPUB", "");
+
             if (i == currentSelection) {
                 display.fillRoundRect(5, y_pos - 24, 380, 34, 4, GxEPD_BLACK);
-                drawShapedText(bookList[i].c_str(), 15, y_pos, GxEPD_WHITE);
+                drawShapedText(displayName.c_str(), 15, y_pos, GxEPD_WHITE);
             } else {
-                drawShapedText(bookList[i].c_str(), 15, y_pos, GxEPD_BLACK);
+                drawShapedText(displayName.c_str(), 15, y_pos, GxEPD_BLACK);
             }
         }
         
@@ -200,13 +214,15 @@ void renderPage() {
     }
 
     int activeFontSize = fontSizes[currentFontIndex];
-    setFontSize(activeFontSize);
     
     display.setFullWindow();
     display.firstPage();
     do {
         display.fillScreen(GxEPD_WHITE);
         UIManager::drawTopBar();
+        
+        // CRITICAL FIX: Reset font size back to reading size after TopBar forced it to 14px
+        setFontSize(activeFontSize);
         
         File file = SD.open(filePath.c_str());
         if (file) {
@@ -287,6 +303,8 @@ void renderPage() {
                     }
                 }
             }
+            
+            // Draw Status Bar last
             int percent = (file.position() * 100) / fileSize;
             UIManager::drawBottomBar(bookList[currentSelection], percent);
             file.close();
@@ -344,7 +362,7 @@ void setup() {
 }
 
 void loop() {
-    handleWiFiClient(); // Listen for incoming file uploads
+    handleWiFiClient(); 
 
     unsigned long currentMillis = millis();
     if (currentMillis - lastButtonPress > 250) { 
@@ -399,11 +417,9 @@ void loop() {
             }
         }
 
-        // NEW: Menu Button Logic
         if (digitalRead(BTN_MENU) == LOW) {
             lastButtonPress = currentMillis;
             if (inReadingMode) {
-                // Change Font Size when reading
                 String f = bookList[currentSelection];
                 if (f.endsWith(".epub") || f.endsWith(".EPUB")) return;
 
@@ -416,7 +432,6 @@ void loop() {
                 currentPage = 0;
                 renderPage(); 
             } else {
-                // Toggle Wi-Fi when on the library screen
                 if (isWifiConnected) {
                     disableWiFi();
                 } else {
@@ -424,8 +439,7 @@ void loop() {
                     setFontSize(14);
                     drawShapedText("Connecting to Wi-Fi...", 10, 18, GxEPD_WHITE);
                     display.setPartialWindow(0, 0, 400, 25);
-                    display.nextPage(); // Quick manual update to show connecting status
-                    
+                    display.nextPage(); 
                     initWiFi(WIFI_SSID, WIFI_PASS);
                 }
                 drawLibraryMenu(false); 

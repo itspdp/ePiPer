@@ -47,7 +47,6 @@ inline bool initRawEngine() {
     return true;
 }
 
-// NEW: Calculates exact pixel width of a shaped word for word-wrapping
 inline int getTextWidth(const char* text) {
     hb_buffer_t *hb_buffer = hb_buffer_create();
     hb_buffer_add_utf8(hb_buffer, text, -1, 0, -1);
@@ -84,7 +83,11 @@ inline void drawShapedText(const char* text, int start_x, int start_y, uint16_t 
     
     for (unsigned int i = 0; i < glyph_count; i++) {
         hb_codepoint_t glyphid = glyph_info[i].codepoint;
-        FT_Load_Glyph(ft_face, glyphid, FT_LOAD_DEFAULT);
+        
+        // CRITICAL FIX: If FreeType fails to load a glyph (e.g., Emojis), skip it instead of crashing
+        if (FT_Load_Glyph(ft_face, glyphid, FT_LOAD_DEFAULT) != 0) {
+            continue;
+        }
         FT_Render_Glyph(ft_face->glyph, FT_RENDER_MODE_NORMAL);
         
         int x_pos = current_x + (glyph_pos[i].x_offset >> 6) + ft_face->glyph->bitmap_left;
@@ -93,8 +96,7 @@ inline void drawShapedText(const char* text, int start_x, int start_y, uint16_t 
         FT_Bitmap* bitmap = &ft_face->glyph->bitmap;
         for (unsigned int row = 0; row < bitmap->rows; ++row) {
             for (unsigned int col = 0; col < bitmap->width; ++col) {
-                // The "> 128" threshold kills the smudgy gray pixels!
-                if (bitmap->buffer[row * bitmap->pitch + col] > 128) { 
+                if (bitmap->buffer[row * bitmap->pitch + col] > 128) {
                     display.drawPixel(x_pos + col, y_pos + row, color);
                 }
             }
