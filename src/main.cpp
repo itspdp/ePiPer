@@ -7,7 +7,7 @@
 #include <time.h> 
 
 // ==========================================
-// 1. HARDWARE DEFINITION
+// 1. HARDWARE & NETWORK CONFIG
 // ==========================================
 #define EPD_PWR       7
 #define EPD_CS        45
@@ -25,8 +25,9 @@
 #define BTN_MENU      2
 #define BTN_EXIT      1
 
-// Future Battery Pin Assignment (Example: ADC1)
-#define BATTERY_ADC_PIN 8 
+// YOUR WI-FI CREDENTIALS HERE
+const char* WIFI_SSID = "Airtel_pran_2503";
+const char* WIFI_PASS = "Air@47479";
 
 // ==========================================
 // 2. MODULAR INCLUDES
@@ -34,6 +35,7 @@
 #include "splash.h"
 #include "system_storage.h"
 #include "text_engine.h"
+#include "wifi_manager.h" // Phase 5 Wireless Ecosystem
 
 // ==========================================
 // 3. GLOBAL INSTANTIATIONS
@@ -66,48 +68,37 @@ int currentPage = 0;
 // ==========================================
 namespace UIManager {
     String currentTime = "12:00 PM"; 
-    bool wifiEnabled = false;
-    bool syncActive = false;
 
-    // --- Battery Logic ---
-    bool isCharging() {
-        // Hardcoded to true since you are currently running on USB power.
-        // In the future, read a USB VBUS detection pin here.
-        return true; 
-    }
+    bool isCharging() { return true; } // USB powered
+    int getBatteryPercentage() { return 100; } // Placeholder
 
-    int getBatteryPercentage() {
-        // Placeholder for future LiPo ADC mapping
-        // return map(analogRead(BATTERY_ADC_PIN), 0, 4095, 0, 100);
-        return 100; 
-    }
-
-    // --- Clock Logic ---
     void updateInternalClock() {
-        unsigned long totalMinutes = millis() / 60000;
-        int hours = (12 + (totalMinutes / 60)) % 12;
-        if (hours == 0) hours = 12;
-        int mins = totalMinutes % 60;
-        char timeBuf[10];
-        snprintf(timeBuf, sizeof(timeBuf), "%d:%02d %s", hours, mins, (millis() % 86400000 < 43200000) ? "PM" : "AM");
-        currentTime = String(timeBuf);
+        struct tm timeinfo;
+        // Attempt to fetch true NTP-synced time from the RTC
+        if (getLocalTime(&timeinfo, 10)) { 
+            char timeBuf[10];
+            strftime(timeBuf, sizeof(timeBuf), "%I:%M %p", &timeinfo);
+            currentTime = String(timeBuf);
+        } else {
+            // Fallback: Simulated offline clock
+            unsigned long totalMinutes = millis() / 60000;
+            int hours = (12 + (totalMinutes / 60)) % 12;
+            if (hours == 0) hours = 12;
+            int mins = totalMinutes % 60;
+            char timeBuf[10];
+            snprintf(timeBuf, sizeof(timeBuf), "%d:%02d %s", hours, mins, (millis() % 86400000 < 43200000) ? "PM" : "AM");
+            currentTime = String(timeBuf);
+        }
     }
 
-    // --- Overlays ---
     void drawTopBar() {
         display.fillRect(0, 0, 400, 25, GxEPD_BLACK);
         setFontSize(14);
         
-        // Left: Wi-Fi Status
-        String wifiStr = wifiEnabled ? "Wi-Fi: ON" : "Wi-Fi: OFF";
+        // Display IP address if connected, else status
+        String wifiStr = isWifiConnected ? currentIP : "Wi-Fi: OFF";
         drawShapedText(wifiStr.c_str(), 10, 18, GxEPD_WHITE);
-        
-        // Center: System Status
-        if (syncActive) {
-            drawShapedText("Syncing...", 170, 18, GxEPD_WHITE);
-        }
 
-        // Right: Battery & Clock
         updateInternalClock();
         String battStr = isCharging() ? "[USB]" : "[" + String(getBatteryPercentage()) + "%]";
         String rightHUD = battStr + "  " + currentTime;
@@ -151,12 +142,9 @@ void drawLibraryMenu(bool partialRefresh = false) {
     do {
         display.fillScreen(GxEPD_WHITE);
         
-        if (!partialRefresh) {
-            UIManager::drawTopBar();
-        }
+        if (!partialRefresh) UIManager::drawTopBar();
 
         setFontSize(24);
-        
         display.fillRect(0, 25, 400, 35, GxEPD_WHITE);
         display.drawFastHLine(0, 60, 400, GxEPD_BLACK);
         drawShapedText("Local Storage (SD)", 10, 50, GxEPD_BLACK);
@@ -199,15 +187,12 @@ void renderPage() {
         do {
             display.fillScreen(GxEPD_WHITE);
             UIManager::drawTopBar();
-            
             setFontSize(24);
             drawShapedText("EPUB Engine Required", 10, 80);
-            
             setFontSize(16);
             drawShapedText("EPUBs are compressed ZIP archives.", 10, 120);
             drawShapedText("We must add a decompression library to", 10, 150);
             drawShapedText("platformio.ini before extracting the text.", 10, 180);
-            
             setFontSize(20);
             drawShapedText("Press EXIT to return.", 10, 240);
         } while (display.nextPage());
@@ -261,7 +246,6 @@ void renderPage() {
                 if (isNewLine && word.startsWith("#")) {
                     int hashCount = 0;
                     while (word.length() > hashCount && word[hashCount] == '#') hashCount++;
-                    
                     if (hashCount > 0 && hashCount <= 6) {
                         float scaleMap[] = {1.6, 1.4, 1.3, 1.2, 1.1, 1.1}; 
                         int scaledSize = activeFontSize * scaleMap[hashCount - 1];
@@ -273,19 +257,14 @@ void renderPage() {
 
                 if (word.length() > 0) {
                     int pure_word_width = getTextWidth(word.c_str());
-
                     if (x_pos + pure_word_width > max_width && x_pos > 10) {
                         x_pos = 10;
                         y_pos += line_height;
                     }
-
                     if (y_pos >= 265) {
-                        if (currentPage + 1 >= (int)pageOffsets.size()) {
-                            pageOffsets.push_back(currentOffset); 
-                        }
+                        if (currentPage + 1 >= (int)pageOffsets.size()) pageOffsets.push_back(currentOffset); 
                         break; 
                     }
-
                     if (hasSpace) word += " ";
                     drawShapedText(word.c_str(), x_pos, y_pos);
                     x_pos += getTextWidth(word.c_str()); 
@@ -308,10 +287,8 @@ void renderPage() {
                     }
                 }
             }
-
             int percent = (file.position() * 100) / fileSize;
             UIManager::drawBottomBar(bookList[currentSelection], percent);
-            
             file.close();
         }
     } while (display.nextPage());
@@ -325,7 +302,6 @@ void openBook() {
         pageOffsets.push_back(0); 
         currentPage = 0;
     }
-    
     renderPage();
 }
 
@@ -368,8 +344,9 @@ void setup() {
 }
 
 void loop() {
+    handleWiFiClient(); // Listen for incoming file uploads
+
     unsigned long currentMillis = millis();
-    
     if (currentMillis - lastButtonPress > 250) { 
     
         if (digitalRead(BTN_UP) == LOW) {
@@ -422,9 +399,11 @@ void loop() {
             }
         }
 
+        // NEW: Menu Button Logic
         if (digitalRead(BTN_MENU) == LOW) {
             lastButtonPress = currentMillis;
             if (inReadingMode) {
+                // Change Font Size when reading
                 String f = bookList[currentSelection];
                 if (f.endsWith(".epub") || f.endsWith(".EPUB")) return;
 
@@ -435,8 +414,21 @@ void loop() {
                 pageOffsets.clear();
                 pageOffsets.push_back(savedOffset);
                 currentPage = 0;
-                
                 renderPage(); 
+            } else {
+                // Toggle Wi-Fi when on the library screen
+                if (isWifiConnected) {
+                    disableWiFi();
+                } else {
+                    display.fillRect(0, 0, 400, 25, GxEPD_BLACK);
+                    setFontSize(14);
+                    drawShapedText("Connecting to Wi-Fi...", 10, 18, GxEPD_WHITE);
+                    display.setPartialWindow(0, 0, 400, 25);
+                    display.nextPage(); // Quick manual update to show connecting status
+                    
+                    initWiFi(WIFI_SSID, WIFI_PASS);
+                }
+                drawLibraryMenu(false); 
             }
         }
     }
