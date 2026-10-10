@@ -4,7 +4,7 @@
 #include <GxEPD2_BW.h>
 #include <vector>
 #include <Preferences.h>
-#include <time.h> // Internal RTC
+#include <time.h> 
 
 // ==========================================
 // 1. HARDWARE DEFINITION
@@ -24,6 +24,9 @@
 #define BTN_SELECT    5  
 #define BTN_MENU      2
 #define BTN_EXIT      1
+
+// Future Battery Pin Assignment (Example: ADC1)
+#define BATTERY_ADC_PIN 8 
 
 // ==========================================
 // 2. MODULAR INCLUDES
@@ -62,11 +65,24 @@ int currentPage = 0;
 // 4. OS UI MANAGER NAMESPACE
 // ==========================================
 namespace UIManager {
-    String currentTime = "12:00 PM"; // Fallback until NTP sync
+    String currentTime = "12:00 PM"; 
     bool wifiEnabled = false;
     bool syncActive = false;
 
-    // Simulates clock progression until we connect to a real NTP server
+    // --- Battery Logic ---
+    bool isCharging() {
+        // Hardcoded to true since you are currently running on USB power.
+        // In the future, read a USB VBUS detection pin here.
+        return true; 
+    }
+
+    int getBatteryPercentage() {
+        // Placeholder for future LiPo ADC mapping
+        // return map(analogRead(BATTERY_ADC_PIN), 0, 4095, 0, 100);
+        return 100; 
+    }
+
+    // --- Clock Logic ---
     void updateInternalClock() {
         unsigned long totalMinutes = millis() / 60000;
         int hours = (12 + (totalMinutes / 60)) % 12;
@@ -77,6 +93,7 @@ namespace UIManager {
         currentTime = String(timeBuf);
     }
 
+    // --- Overlays ---
     void drawTopBar() {
         display.fillRect(0, 0, 400, 25, GxEPD_BLACK);
         setFontSize(14);
@@ -90,10 +107,13 @@ namespace UIManager {
             drawShapedText("Syncing...", 170, 18, GxEPD_WHITE);
         }
 
-        // Right: Right-Aligned Clock
+        // Right: Battery & Clock
         updateInternalClock();
-        int timeWidth = getTextWidth(currentTime.c_str());
-        drawShapedText(currentTime.c_str(), 390 - timeWidth, 18, GxEPD_WHITE);
+        String battStr = isCharging() ? "[USB]" : "[" + String(getBatteryPercentage()) + "%]";
+        String rightHUD = battStr + "  " + currentTime;
+        
+        int hudWidth = getTextWidth(rightHUD.c_str());
+        drawShapedText(rightHUD.c_str(), 390 - hudWidth, 18, GxEPD_WHITE);
     }
 
     void drawBottomBar(String title, int percent) {
@@ -124,7 +144,7 @@ void showBootScreen() {
 
 void drawLibraryMenu(bool partialRefresh = false) {
     display.setRotation(0);
-    if (partialRefresh) display.setPartialWindow(0, 25, 400, 275); // Protect Top Bar
+    if (partialRefresh) display.setPartialWindow(0, 25, 400, 275); 
     else display.setFullWindow();
     
     display.firstPage();
@@ -137,7 +157,6 @@ void drawLibraryMenu(bool partialRefresh = false) {
 
         setFontSize(24);
         
-        // Sub-Header for Library
         display.fillRect(0, 25, 400, 35, GxEPD_WHITE);
         display.drawFastHLine(0, 60, 400, GxEPD_BLACK);
         drawShapedText("Local Storage (SD)", 10, 50, GxEPD_BLACK);
@@ -174,7 +193,6 @@ void renderPage() {
     String filePath = bookList[currentSelection];
     if (!filePath.startsWith("/")) filePath = "/" + filePath;
 
-    // Strict EPUB Guardrail (Requires Phase 5 Decompressor)
     if (filePath.endsWith(".epub") || filePath.endsWith(".EPUB")) {
         display.setFullWindow();
         display.firstPage();
@@ -213,7 +231,7 @@ void renderPage() {
             int max_width = 390; 
             int line_height = activeFontSize + (activeFontSize / 3);
             int x_pos = 10;
-            int y_pos = 25 + activeFontSize + 10; // Start below top bar
+            int y_pos = 25 + activeFontSize + 10; 
             bool isNewLine = true;
             
             while (file.available()) {
@@ -261,7 +279,6 @@ void renderPage() {
                         y_pos += line_height;
                     }
 
-                    // Strict Sandboxing: Stop rendering before hitting the Bottom Bar
                     if (y_pos >= 265) {
                         if (currentPage + 1 >= (int)pageOffsets.size()) {
                             pageOffsets.push_back(currentOffset); 
@@ -373,7 +390,6 @@ void loop() {
         if (digitalRead(BTN_DOWN) == LOW) {
             lastButtonPress = currentMillis;
             if (inReadingMode) {
-                // If it's an EPUB, block pagination
                 String f = bookList[currentSelection];
                 if (f.endsWith(".epub") || f.endsWith(".EPUB")) return;
 
@@ -409,7 +425,6 @@ void loop() {
         if (digitalRead(BTN_MENU) == LOW) {
             lastButtonPress = currentMillis;
             if (inReadingMode) {
-                // If it's an EPUB, block font changing
                 String f = bookList[currentSelection];
                 if (f.endsWith(".epub") || f.endsWith(".EPUB")) return;
 
