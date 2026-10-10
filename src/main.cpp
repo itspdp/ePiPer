@@ -3,6 +3,7 @@
 #include <SD.h>
 #include <GxEPD2_BW.h>
 #include <vector>
+#include <Preferences.h> // Added for permanent bookmarking
 
 // 1. Hardware Definition
 #define EPD_PWR       7
@@ -31,6 +32,8 @@ GxEPD2_BW<GxEPD2_420_SE0420NQ04, GxEPD2_420_SE0420NQ04::HEIGHT> display(
     GxEPD2_420_SE0420NQ04(EPD_CS, EPD_DC, EPD_RES, EPD_BUSY)
 );
 SPIClass sdSPI(FSPI);
+Preferences prefs;
+
 std::vector<String> bookList;
 uint8_t* font_buffer = nullptr;
 FT_Library ft_library;
@@ -117,6 +120,7 @@ void renderPage() {
 
         if (file) {
             file.seek(pageOffsets[currentPage]);
+            uint32_t fileSize = file.size();
 
             int max_width = 390; 
             int line_height = activeFontSize + (activeFontSize / 3);
@@ -130,7 +134,6 @@ void renderPage() {
                 bool paragraphBreak = false;
                 bool hasSpace = false;
 
-                // 1. Precise Character Tokenizer (Fixes ignored line breaks)
                 while (file.available()) {
                     char c = file.read();
                     if (c == ' ') {
@@ -144,17 +147,27 @@ void renderPage() {
                     }
                 }
 
+                // Clean Markdown Bolding
+                word.replace("**", "");
+                word.replace("__", "");
+
                 if (word.length() == 0 && !paragraphBreak) continue;
 
-                // 2. Markdown Headers
+                // Smart Markdown Proportional Headers
                 if (isNewLine && word.startsWith("#")) {
-                    setFontSize(activeFontSize + 12);
-                    line_height = (activeFontSize + 12) * 1.3;
-                    word = word.substring(1); 
+                    int hashCount = 0;
+                    while (word.length() > hashCount && word[hashCount] == '#') hashCount++;
+                    
+                    if (hashCount > 0 && hashCount <= 6) {
+                        float scaleMap[] = {1.6, 1.4, 1.3, 1.2, 1.1, 1.1}; // Proportional scaling
+                        int scaledSize = activeFontSize * scaleMap[hashCount - 1];
+                        setFontSize(scaledSize);
+                        line_height = scaledSize * 1.3;
+                        word = word.substring(hashCount); // Strip hashes
+                    }
                 }
 
                 if (word.length() > 0) {
-                    // FIX: Calculate width WITHOUT the space to prevent premature wrapping
                     int pure_word_width = getTextWidth(word.c_str());
 
                     if (x_pos + pure_word_width > max_width && x_pos > 10) {
@@ -162,22 +175,21 @@ void renderPage() {
                         y_pos += line_height;
                     }
 
-                    if (y_pos >= 290) {
+                    // Stop rendering at y=270 to leave room for the Status Bar
+                    if (y_pos >= 270) {
                         if (currentPage + 1 >= (int)pageOffsets.size()) {
                             pageOffsets.push_back(currentOffset); 
                         }
                         break; 
                     }
 
-                    // Append space for actual drawing
                     if (hasSpace) word += " ";
                     drawShapedText(word.c_str(), x_pos, y_pos);
-                    x_pos += getTextWidth(word.c_str()); // Advance by full width
+                    x_pos += getTextWidth(word.c_str()); 
                 }
 
                 isNewLine = false;
 
-                // 3. True Paragraph Breaks
                 if (paragraphBreak) {
                     x_pos = 10;
                     y_pos += line_height;
@@ -185,7 +197,7 @@ void renderPage() {
                     setFontSize(activeFontSize); 
                     line_height = activeFontSize + (activeFontSize / 3);
 
-                    if (y_pos >= 290) {
+                    if (y_pos >= 270) {
                         if (file.available() && currentPage + 1 >= (int)pageOffsets.size()) {
                             pageOffsets.push_back(file.position());
                         }
@@ -193,6 +205,21 @@ void renderPage() {
                     }
                 }
             }
+
+            // --- CONSUMER UI: STATUS BAR ---
+            display.fillRect(0, 275, 400, 25, GxEPD_BLACK);
+            setFontSize(16);
+            
+            // Draw Truncated Book Title
+            String title = bookList[currentSelection];
+            if (title.length() > 25) title = title.substring(0, 22) + "...";
+            drawShapedText(title.c_str(), 10, 293, GxEPD_WHITE);
+
+            // Draw Percentage
+            int percent = (file.position() * 100) / fileSize;
+            String progress = String(percent) + "%";
+            drawShapedText(progress.c_str(), 350, 293, GxEPD_WHITE);
+            
             file.close();
         }
     } while (display.nextPage());
@@ -201,9 +228,13 @@ void renderPage() {
 void openBook() {
     inReadingMode = true;
     
-    pageOffsets.clear();
-    pageOffsets.push_back(0); 
-    currentPage = 0;
+    // Save current book to memory
+    prefs.putInt("bookIndex", currentSelection);
+
+    if (pageOffsets.empty()) {
+        pageOffsets.push_back(0); 
+        currentPage = 0;
+    }
     
     renderPage();
 }
@@ -213,6 +244,7 @@ void openBook() {
 // ==========================================
 void setup() {
     Serial.begin(115200);
+    prefs.begin("epiper", false);
     
     pinMode(BTN_UP, INPUT_PULLUP);
     pinMode(BTN_DOWN, INPUT_PULLUP);
@@ -229,7 +261,20 @@ void setup() {
     
     if (mountSDCard() && initRawEngine()) {
         scanForBooks();
-        drawLibraryMenu(false); 
+        
+        // Auto-Resume Last Read Book
+        int savedBook = prefs.getInt("bookIndex", -1);
+        uint32_t savedOffset = prefs.getUInt("pageOffset", 0);
+        
+        if (savedBook >= 0 && savedBook < (int)bookList.size()) {
+            currentSelection = savedBook;
+            pageOffsets.clear();
+            pageOffsets.push_back(savedOffset);
+            currentPage = 0;
+            openBook();
+        } else {
+            drawLibraryMenu(false); 
+        }
     }
 }
 
@@ -243,6 +288,7 @@ void loop() {
             if (inReadingMode) {
                 if (currentPage > 0) {
                     currentPage--;
+                    prefs.putUInt("pageOffset", pageOffsets[currentPage]); // Save Bookmark
                     renderPage();
                 }
             } else if (!bookList.empty()) {
@@ -257,6 +303,7 @@ void loop() {
             if (inReadingMode) {
                 if (currentPage + 1 < (int)pageOffsets.size()) {
                     currentPage++;
+                    prefs.putUInt("pageOffset", pageOffsets[currentPage]); // Save Bookmark
                     renderPage();
                 }
             } else if (!bookList.empty()) {
@@ -269,6 +316,7 @@ void loop() {
         if (digitalRead(BTN_SELECT) == LOW) {
             lastButtonPress = currentMillis;
             if (!inReadingMode && !bookList.empty()) {
+                pageOffsets.clear(); // Fresh start if opened manually from menu
                 openBook();
             }
         }
@@ -277,6 +325,7 @@ void loop() {
             lastButtonPress = currentMillis;
             if (inReadingMode) {
                 inReadingMode = false;
+                prefs.putInt("bookIndex", -1); // Clear active book so it boots to menu next time
                 drawLibraryMenu(false); 
             }
         }
