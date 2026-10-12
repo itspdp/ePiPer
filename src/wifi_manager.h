@@ -18,7 +18,7 @@ String currentIP = "";
 const long gmtOffset_sec = 19800; // IST
 const int daylightOffset_sec = 0;
 
-// Material 3 Expressive SPA (Single Page Application)
+// Material 3 Expressive SPA
 const char* html_dashboard = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -35,7 +35,6 @@ const char* html_dashboard = R"rawliteral(
             --md-sys-color-surface: #fdf8fd;
             --md-sys-color-surface-container: #f3f3f8;
             --md-sys-color-error: #ba1a1a;
-            --md-sys-color-on-error: #ffffff;
             --md-elevation-1: 0px 1px 3px 1px rgba(0,0,0,0.15), 0px 1px 2px 0px rgba(0,0,0,0.3);
             --md-elevation-3: 0px 4px 8px 3px rgba(0,0,0,0.15), 0px 1px 3px 0px rgba(0,0,0,0.3);
         }
