@@ -70,6 +70,10 @@ bool exitLongHandled = false;
 
 unsigned long lastActionTime = 0; 
 
+// Layout Constants for Perfect Cache Synchronization
+#define TOP_BAR_H 20
+#define BOT_BAR_Y 276
+
 // ==========================================
 // 4. THE SD CACHING ENGINE
 // ==========================================
@@ -105,8 +109,8 @@ void buildCache(String filePath, String cachePath, int activeFontSize) {
         setFontSize(24);
         drawShapedText("Paginating Document...", 10, 100);
         setFontSize(16);
-        drawShapedText("Calculating line-breaks and saving to cache.", 10, 150);
-        drawShapedText("This happens only ONCE per font size.", 10, 180);
+        drawShapedText("Caching precise line-breaks to SD Card.", 10, 150);
+        drawShapedText("This ensures flawless reverse-scrolling.", 10, 180);
     } while (display.nextPage());
 
     pageOffsets.clear();
@@ -118,7 +122,7 @@ void buildCache(String filePath, String cachePath, int activeFontSize) {
     int max_width = 390; 
     int line_height = activeFontSize + (activeFontSize / 3);
     int x_pos = 10;
-    int y_pos = 24 + activeFontSize + 6; // Accounts for 24px Top Bar
+    int y_pos = TOP_BAR_H + activeFontSize + 6; 
     bool isNewLine = true;
 
     while (file.available()) {
@@ -153,15 +157,16 @@ void buildCache(String filePath, String cachePath, int activeFontSize) {
 
         if (word.length() > 0) {
             int pure_word_width = getTextWidth(word.c_str());
+            
             if (x_pos + pure_word_width > max_width && x_pos > 10) {
                 x_pos = 10;
                 y_pos += line_height;
             }
             
-            if (y_pos >= 272) { // 272px leaves room for Bottom Bar
+            if (y_pos >= BOT_BAR_Y) {
                 pageOffsets.push_back(currentOffset);
                 x_pos = 10;
-                y_pos = 24 + activeFontSize + 6; 
+                y_pos = TOP_BAR_H + activeFontSize + 6; 
             }
             
             if (hasSpace) word += " ";
@@ -177,16 +182,16 @@ void buildCache(String filePath, String cachePath, int activeFontSize) {
             setFontSize(activeFontSize); 
             line_height = activeFontSize + (activeFontSize / 3);
 
-            if (y_pos >= 272) {
+            if (y_pos >= BOT_BAR_Y) {
                 if (file.available()) pageOffsets.push_back(file.position());
                 x_pos = 10;
-                y_pos = 24 + activeFontSize + 6; 
+                y_pos = TOP_BAR_H + activeFontSize + 6; 
             }
         }
     }
     file.close();
     saveCache(cachePath);
-    setFontSize(activeFontSize); // Reset engine for rendering
+    setFontSize(activeFontSize); 
 }
 
 // ==========================================
@@ -215,23 +220,23 @@ namespace UIManager {
     }
 
     void drawTopBar() {
-        display.fillRect(0, 0, 400, 24, GxEPD_BLACK); // Reduced Top Bar Space
+        display.fillRect(0, 0, 400, TOP_BAR_H, GxEPD_BLACK); 
         setFontSize(14); 
         
         String wifiStr = isWifiConnected ? currentIP : "Wi-Fi: OFF";
-        drawShapedText(wifiStr.c_str(), 10, 17, GxEPD_WHITE);
+        drawShapedText(wifiStr.c_str(), 10, 15, GxEPD_WHITE);
 
         updateInternalClock();
         String battStr = isCharging() ? "[USB]" : "[" + String(getBatteryPercentage()) + "%]";
         String rightHUD = battStr + "  " + currentTime;
         
         int hudWidth = getTextWidth(rightHUD.c_str());
-        drawShapedText(rightHUD.c_str(), 390 - hudWidth, 17, GxEPD_WHITE);
+        drawShapedText(rightHUD.c_str(), 390 - hudWidth, 15, GxEPD_WHITE);
     }
 
     void drawBottomBar(String title, int currentPg, int totalPg) {
-        display.fillRect(0, 272, 400, 28, GxEPD_BLACK); // Adjusted Bottom Bar
-        setFontSize(20); // Font 20 guarantees "क्ष" renders properly!
+        display.fillRect(0, BOT_BAR_Y, 400, 24, GxEPD_BLACK); 
+        setFontSize(18); // Minimum required height for Devanagari "क्ष" without boxing
         
         title.replace(".txt", "");
         title.replace(".TXT", "");
@@ -241,12 +246,11 @@ namespace UIManager {
         title.replace(".EPUB", "");
 
         if (title.length() > 22) title = title.substring(0, 19) + "...";
-        drawShapedText(title.c_str(), 10, 292, GxEPD_WHITE);
+        drawShapedText(title.c_str(), 10, 294, GxEPD_WHITE);
 
-        // Thanks to caching, we now show exact Page Numbers!
         String progress = String(currentPg + 1) + " / " + String(totalPg);
         int progWidth = getTextWidth(progress.c_str());
-        drawShapedText(progress.c_str(), 390 - progWidth, 292, GxEPD_WHITE);
+        drawShapedText(progress.c_str(), 390 - progWidth, 294, GxEPD_WHITE);
     }
 }
 
@@ -265,7 +269,7 @@ void showBootScreen() {
 
 void drawLibraryMenu(bool partialRefresh = false) {
     display.setRotation(0);
-    if (partialRefresh) display.setPartialWindow(0, 24, 400, 276); 
+    if (partialRefresh) display.setPartialWindow(0, TOP_BAR_H, 400, 300 - TOP_BAR_H); 
     else display.setFullWindow();
     
     display.firstPage();
@@ -275,22 +279,22 @@ void drawLibraryMenu(bool partialRefresh = false) {
         if (!partialRefresh) UIManager::drawTopBar();
 
         setFontSize(24);
-        display.fillRect(0, 24, 400, 36, GxEPD_WHITE);
-        display.drawFastHLine(0, 60, 400, GxEPD_BLACK);
-        drawShapedText("Local Storage (SD)", 10, 48, GxEPD_BLACK);
+        display.fillRect(0, TOP_BAR_H, 400, 36, GxEPD_WHITE);
+        display.drawFastHLine(0, TOP_BAR_H + 36, 400, GxEPD_BLACK);
+        drawShapedText("Local Storage (SD)", 10, TOP_BAR_H + 24, GxEPD_BLACK);
         
         if (bookList.empty()) {
             drawShapedText("No books found on SD.", 10, 110);
             continue;
         }
 
-        // Restored denser gaps as requested
-        int visibleItems = 5;
+        // Restored denser gaps
+        int visibleItems = 6;
         int startIndex = 0;
         if (currentSelection >= visibleItems) startIndex = currentSelection - visibleItems + 1; 
 
         for (int i = startIndex; i < (int)bookList.size() && i < startIndex + visibleItems; i++) {
-            int y_pos = 95 + ((i - startIndex) * 42); 
+            int y_pos = 90 + ((i - startIndex) * 34); 
             
             String displayName = bookList[i];
             displayName.replace(".txt", "");
@@ -301,10 +305,10 @@ void drawLibraryMenu(bool partialRefresh = false) {
             displayName.replace(".EPUB", "");
 
             if (i == currentSelection) {
-                display.fillRoundRect(5, y_pos - 24, 380, 34, 4, GxEPD_BLACK);
-                drawShapedText(displayName.c_str(), 15, y_pos, GxEPD_WHITE);
+                display.fillRoundRect(5, y_pos - 24, 380, 32, 4, GxEPD_BLACK);
+                drawShapedText(displayName.c_str(), 15, y_pos - 2, GxEPD_WHITE);
             } else {
-                drawShapedText(displayName.c_str(), 15, y_pos, GxEPD_BLACK);
+                drawShapedText(displayName.c_str(), 15, y_pos - 2, GxEPD_BLACK);
             }
         }
         
@@ -355,7 +359,7 @@ void renderPage() {
             int max_width = 390; 
             int line_height = activeFontSize + (activeFontSize / 3);
             int x_pos = 10;
-            int y_pos = 24 + activeFontSize + 6; 
+            int y_pos = TOP_BAR_H + activeFontSize + 6; 
             bool isNewLine = true;
             
             while (file.available()) {
@@ -393,7 +397,7 @@ void renderPage() {
                         x_pos = 10;
                         y_pos += line_height;
                     }
-                    if (y_pos >= 272) break; // Engine just stops. Cache array handles the rest.
+                    if (y_pos >= BOT_BAR_Y) break; 
                     
                     if (hasSpace) word += " ";
                     drawShapedText(word.c_str(), x_pos, y_pos);
@@ -408,7 +412,7 @@ void renderPage() {
                     isNewLine = true;
                     setFontSize(activeFontSize); 
                     line_height = activeFontSize + (activeFontSize / 3);
-                    if (y_pos >= 272) break; 
+                    if (y_pos >= BOT_BAR_Y) break; 
                 }
             }
             
@@ -430,7 +434,6 @@ void openBook() {
         return;
     }
 
-    // Identify or Build Cache
     String cacheName = bookList[currentSelection];
     cacheName.replace("/", "_");
     cacheName.replace(".txt", "");
@@ -542,10 +545,10 @@ void loop() {
             if (isWifiConnected) {
                 disableWiFi();
             } else {
-                display.fillRect(0, 0, 400, 24, GxEPD_BLACK);
+                display.fillRect(0, 0, 400, TOP_BAR_H, GxEPD_BLACK);
                 setFontSize(14);
-                drawShapedText("Connecting to Wi-Fi...", 10, 17, GxEPD_WHITE);
-                display.setPartialWindow(0, 0, 400, 24);
+                drawShapedText("Connecting to Wi-Fi...", 10, 15, GxEPD_WHITE);
+                display.setPartialWindow(0, 0, 400, TOP_BAR_H);
                 display.nextPage(); 
                 initWiFi(WIFI_SSID, WIFI_PASS);
             }
@@ -562,11 +565,8 @@ void loop() {
                         if (currentFontIndex > 3) currentFontIndex = 0;
                         
                         uint32_t savedOffset = pageOffsets[currentPage];
-                        
-                        // Force openBook to build/load the cache array for the new font
                         openBook(); 
                         
-                        // Resynchronize currentPage to match the old byte position
                         currentPage = 0;
                         for (int i = 0; i < (int)pageOffsets.size(); i++) {
                             if (pageOffsets[i] <= savedOffset) currentPage = i;
@@ -581,7 +581,7 @@ void loop() {
         }
     }
 
-    // THE O(1) JUMP MECHANIC
+    // BI-DIRECTIONAL JUMP LOGIC
     if (digitalRead(BTN_EXIT) == LOW) {
         if (!exitPressed) {
             exitPressTime = currentMillis;
@@ -592,13 +592,12 @@ void loop() {
             
             if (inReadingMode) {
                 if (currentPage == 0) {
-                    currentPage = pageOffsets.size() - 1; // Instant jump to bottom
+                    currentPage = pageOffsets.size() > 0 ? pageOffsets.size() - 1 : 0; // JUMP BOTTOM
                 } else {
-                    currentPage = 0; // Instant jump to top
+                    currentPage = 0; // JUMP TOP
                 }
                 prefs.putUInt("pageIndex", currentPage);
                 
-                // Deep clean signals a massive jump
                 display.setFullWindow();
                 display.firstPage();
                 do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
