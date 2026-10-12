@@ -7,7 +7,7 @@
 #include <time.h> 
 
 // ==========================================
-// 1. HARDWARE & NETWORK CONFIG
+// 1. HARDWARE DEFINITION
 // ==========================================
 #define EPD_PWR       7
 #define EPD_CS        45
@@ -24,9 +24,6 @@
 #define BTN_SELECT    5  
 #define BTN_MENU      2
 #define BTN_EXIT      1
-
-const char* WIFI_SSID = "Your_WiFi_Name";
-const char* WIFI_PASS = "Your_WiFi_Password";
 
 // ==========================================
 // 2. MODULAR INCLUDES
@@ -70,7 +67,6 @@ bool exitLongHandled = false;
 
 unsigned long lastActionTime = 0; 
 
-// Layout Constants for Perfect Cache Synchronization
 #define TOP_BAR_H 20
 #define BOT_BAR_Y 276
 
@@ -223,7 +219,12 @@ namespace UIManager {
         display.fillRect(0, 0, 400, TOP_BAR_H, GxEPD_BLACK); 
         setFontSize(14); 
         
-        String wifiStr = isWifiConnected ? currentIP : "Wi-Fi: OFF";
+        // Indicate if we are connected or broadcasting a fallback Access Point
+        String wifiStr;
+        if (isAPMode) wifiStr = "AP: " + currentIP;
+        else if (isWifiConnected) wifiStr = currentIP;
+        else wifiStr = "Wi-Fi: OFF";
+        
         drawShapedText(wifiStr.c_str(), 10, 15, GxEPD_WHITE);
 
         updateInternalClock();
@@ -236,7 +237,7 @@ namespace UIManager {
 
     void drawBottomBar(String title, int currentPg, int totalPg) {
         display.fillRect(0, BOT_BAR_Y, 400, 24, GxEPD_BLACK); 
-        setFontSize(18); // Minimum required height for Devanagari "क्ष" without boxing
+        setFontSize(18); 
         
         title.replace(".txt", "");
         title.replace(".TXT", "");
@@ -288,7 +289,6 @@ void drawLibraryMenu(bool partialRefresh = false) {
             continue;
         }
 
-        // Restored denser gaps
         int visibleItems = 6;
         int startIndex = 0;
         if (currentSelection >= visibleItems) startIndex = currentSelection - visibleItems + 1; 
@@ -550,7 +550,7 @@ void loop() {
                 drawShapedText("Connecting to Wi-Fi...", 10, 15, GxEPD_WHITE);
                 display.setPartialWindow(0, 0, 400, TOP_BAR_H);
                 display.nextPage(); 
-                initWiFi(WIFI_SSID, WIFI_PASS);
+                initWiFi(); // No longer requires hardcoded credentials
             }
             if (!inReadingMode) drawLibraryMenu(false);
             else renderPage();
@@ -581,7 +581,6 @@ void loop() {
         }
     }
 
-    // BI-DIRECTIONAL JUMP LOGIC
     if (digitalRead(BTN_EXIT) == LOW) {
         if (!exitPressed) {
             exitPressTime = currentMillis;
@@ -592,9 +591,9 @@ void loop() {
             
             if (inReadingMode) {
                 if (currentPage == 0) {
-                    currentPage = pageOffsets.size() > 0 ? pageOffsets.size() - 1 : 0; // JUMP BOTTOM
+                    currentPage = pageOffsets.size() > 0 ? pageOffsets.size() - 1 : 0;
                 } else {
-                    currentPage = 0; // JUMP TOP
+                    currentPage = 0; 
                 }
                 prefs.putUInt("pageIndex", currentPage);
                 

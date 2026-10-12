@@ -6,6 +6,7 @@
 #include <WebServer.h>
 #include <time.h>
 #include <SD.h>
+#include <vector>
 #include "system_storage.h"
 
 extern void drawLibraryMenu(bool partialRefresh); 
@@ -13,12 +14,54 @@ extern void drawLibraryMenu(bool partialRefresh);
 WebServer server(80);
 File uploadFile;
 bool isWifiConnected = false;
+bool isAPMode = false;
 String currentIP = "";
 
 const long gmtOffset_sec = 19800; // IST
 const int daylightOffset_sec = 0;
 
-// Material 3 Expressive SPA
+struct WiFiCred {
+    String ssid;
+    String pass;
+};
+std::vector<WiFiCred> savedNetworks;
+
+// ==========================================
+// WIFI CREDENTIAL STORAGE
+// ==========================================
+void loadNetworks() {
+    savedNetworks.clear();
+    if (!SD.exists("/sys")) SD.mkdir("/sys");
+    File f = SD.open("/sys/wifi.txt", FILE_READ);
+    if (!f) return;
+    
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        int split = line.indexOf('|');
+        if (split > 0) {
+            WiFiCred cred;
+            cred.ssid = line.substring(0, split);
+            cred.pass = line.substring(split + 1);
+            savedNetworks.push_back(cred);
+        }
+    }
+    f.close();
+}
+
+void saveNetworks() {
+    File f = SD.open("/sys/wifi.txt", FILE_WRITE);
+    if (f) {
+        for (const auto& net : savedNetworks) {
+            f.println(net.ssid + "|" + net.pass);
+        }
+        f.close();
+    }
+}
+
+// ==========================================
+// MATERIAL 3 EXPRESSIVE SPA
+// ==========================================
 const char* html_dashboard = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -55,7 +98,7 @@ const char* html_dashboard = R"rawliteral(
         .fab:hover { background-color: #004a99; box-shadow: var(--md-elevation-3); transform: translateY(-2px); }
         
         .upload-form { display: flex; gap: 16px; align-items: center; justify-content: center; flex-wrap: wrap; }
-        input[type="file"] { font-size: 16px; padding: 12px; background: var(--md-sys-color-surface-container); border-radius: 12px; border: 1px solid #ddd; }
+        input[type="text"], input[type="password"], input[type="file"] { font-size: 16px; padding: 12px; background: var(--md-sys-color-surface-container); border-radius: 12px; border: 1px solid #ddd; width: 100%; box-sizing: border-box; margin-bottom: 12px; }
         
         .file-list { display: grid; gap: 12px; }
         .file-item { display: flex; justify-content: space-between; align-items: center; background: var(--md-sys-color-surface); padding: 16px 24px; border-radius: 20px; box-shadow: var(--md-elevation-1); }
@@ -67,7 +110,6 @@ const char* html_dashboard = R"rawliteral(
         .btn-error { background: #ffdad6; color: #410002; }
         .btn-error:hover { background: #ffb4ab; }
 
-        /* M3 Modal */
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); z-index: 100; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.3s; }
         .modal.active { display: flex; opacity: 1; }
         .modal-content { background: var(--md-sys-color-surface); width: 90%; max-width: 700px; max-height: 85vh; border-radius: 28px; padding: 32px; display: flex; flex-direction: column; box-shadow: var(--md-elevation-3); transform: translateY(20px); transition: transform 0.3s cubic-bezier(0.2, 0, 0, 1); }
@@ -82,6 +124,7 @@ const char* html_dashboard = R"rawliteral(
     <div class="container">
         <div class="header">
             <h1>ePiPer OS</h1>
+            <button class="btn-icon" onclick="openSettings()">⚙️ Settings</button>
         </div>
         
         <div class="stats-grid">
@@ -110,9 +153,27 @@ const char* html_dashboard = R"rawliteral(
         <div class="modal-content">
             <div class="modal-header">
                 <h2 id="modalTitle">Document Preview</h2>
-                <button class="close-btn" onclick="closeModal()">&times;</button>
+                <button class="close-btn" onclick="closeModal('previewModal')">&times;</button>
             </div>
             <div id="previewText">Loading...</div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal" id="settingsModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Wi-Fi Networks</h2>
+                <button class="close-btn" onclick="closeModal('settingsModal')">&times;</button>
+            </div>
+            <div class="file-list" id="wifiList" style="margin-bottom: 24px;"></div>
+            
+            <form method="POST" action="/api/wifi" style="background: var(--md-sys-color-surface-container); padding: 16px; border-radius: 16px;">
+                <h3 style="margin-top: 0;">Add Network</h3>
+                <input type="text" name="ssid" placeholder="Wi-Fi SSID (Name)" required>
+                <input type="password" name="pass" placeholder="Password" required>
+                <button type="submit" class="fab" style="width: 100%; padding: 10px;">Save Network</button>
+            </form>
         </div>
     </div>
 
@@ -141,30 +202,43 @@ const char* html_dashboard = R"rawliteral(
             });
         }
 
+        function openSettings() {
+            fetch('/api/wifi').then(res => res.json()).then(data => {
+                const list = document.getElementById('wifiList');
+                list.innerHTML = '';
+                data.forEach(net => {
+                    list.innerHTML += `
+                        <div class="file-item">
+                            <span class="file-name">${net}</span>
+                            <button class="btn-icon btn-error" onclick="deleteWifi('${net}')">Forget</button>
+                        </div>`;
+                });
+                document.getElementById('settingsModal').classList.add('active');
+            });
+        }
+
         function deleteFile(filename) {
             if(confirm("Permanently delete " + filename + " from ePiPer?")) {
-                fetch('/delete?file=' + encodeURIComponent(filename), {method: 'DELETE'})
-                .then(() => loadData());
+                fetch('/delete?file=' + encodeURIComponent(filename), {method: 'DELETE'}).then(() => loadData());
             }
         }
 
+        function deleteWifi(ssid) {
+            fetch('/api/wifi?ssid=' + encodeURIComponent(ssid), {method: 'DELETE'}).then(() => openSettings());
+        }
+
         function previewFile(filename) {
-            const modal = document.getElementById('previewModal');
             document.getElementById('modalTitle').innerText = filename;
             document.getElementById('previewText').innerText = 'Fetching document from ePiPer SD card...';
-            modal.classList.add('active');
+            document.getElementById('previewModal').classList.add('active');
 
             fetch('/download?file=' + encodeURIComponent(filename))
                 .then(res => res.text())
-                .then(text => {
-                    document.getElementById('previewText').innerText = text.substring(0, 5000) + (text.length > 5000 ? '\n\n[Preview Truncated...]' : '');
-                })
+                .then(text => document.getElementById('previewText').innerText = text.substring(0, 5000) + (text.length > 5000 ? '\n\n[Preview Truncated...]' : ''))
                 .catch(err => document.getElementById('previewText').innerText = 'Error loading preview.');
         }
 
-        function closeModal() {
-            document.getElementById('previewModal').classList.remove('active');
-        }
+        function closeModal(id) { document.getElementById(id).classList.remove('active'); }
 
         loadData();
     </script>
@@ -172,9 +246,10 @@ const char* html_dashboard = R"rawliteral(
 </html>
 )rawliteral";
 
-void handleRoot() {
-    server.send(200, "text/html", html_dashboard);
-}
+// ==========================================
+// HTTP HANDLERS
+// ==========================================
+void handleRoot() { server.send(200, "text/html", html_dashboard); }
 
 void handleApiData() {
     float totalMB = SD.totalBytes() / (1024.0 * 1024.0);
@@ -190,6 +265,51 @@ void handleApiData() {
     }
     json += "]}";
     server.send(200, "application/json", json);
+}
+
+void handleGetWifi() {
+    String json = "[";
+    for (size_t i = 0; i < savedNetworks.size(); i++) {
+        json += "\"" + savedNetworks[i].ssid + "\"";
+        if (i < savedNetworks.size() - 1) json += ",";
+    }
+    json += "]";
+    server.send(200, "application/json", json);
+}
+
+void handlePostWifi() {
+    if (server.hasArg("ssid") && server.hasArg("pass")) {
+        WiFiCred cred;
+        cred.ssid = server.arg("ssid");
+        cred.pass = server.arg("pass");
+        
+        bool exists = false;
+        for (auto& net : savedNetworks) {
+            if (net.ssid == cred.ssid) { net.pass = cred.pass; exists = true; break; }
+        }
+        if (!exists) savedNetworks.push_back(cred);
+        
+        saveNetworks();
+        server.sendHeader("Location", "/");
+        server.send(303);
+    } else {
+        server.send(400, "text/plain", "Missing credentials");
+    }
+}
+
+void handleDeleteWifi() {
+    if (server.hasArg("ssid")) {
+        String target = server.arg("ssid");
+        for (auto it = savedNetworks.begin(); it != savedNetworks.end(); ++it) {
+            if (it->ssid == target) {
+                savedNetworks.erase(it);
+                saveNetworks();
+                server.send(200, "text/plain", "Deleted");
+                return;
+            }
+        }
+    }
+    server.send(404, "text/plain", "Not Found");
 }
 
 void handleFileUpload() {
@@ -238,41 +358,63 @@ void handleDownload() {
     server.send(404, "text/plain", "File Not Found");
 }
 
-void initWiFi(const char* ssid, const char* password) {
+// ==========================================
+// AUTO-ROUTING WIFI ENGINE
+// ==========================================
+void initWiFi() {
+    loadNetworks();
     WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid, password);
     
-    int retries = 0;
-    while (WiFi.status() != WL_CONNECTED && retries < 20) {
-        delay(500);
-        retries++;
+    bool connected = false;
+
+    // Attempt to connect to saved networks
+    for (const auto& net : savedNetworks) {
+        WiFi.begin(net.ssid.c_str(), net.pass.c_str());
+        int retries = 0;
+        while (WiFi.status() != WL_CONNECTED && retries < 15) {
+            delay(500);
+            retries++;
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+            connected = true;
+            break;
+        }
     }
 
-    if (WiFi.status() == WL_CONNECTED) {
+    if (connected) {
         isWifiConnected = true;
+        isAPMode = false;
         currentIP = WiFi.localIP().toString();
         configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.nist.gov");
-
-        server.on("/", HTTP_GET, handleRoot);
-        server.on("/api/data", HTTP_GET, handleApiData);
-        server.on("/delete", HTTP_DELETE, handleDelete);
-        server.on("/download", HTTP_GET, handleDownload);
-        
-        server.on("/upload", HTTP_POST, []() {
-            server.sendHeader("Location", "/");
-            server.send(303);
-        }, handleFileUpload);
-        
-        server.begin();
     } else {
-        isWifiConnected = false;
-        WiFi.disconnect(true);
-        WiFi.mode(WIFI_OFF);
+        // Fallback: Access Point Mode
+        WiFi.mode(WIFI_AP);
+        WiFi.softAP("ePiPer_Setup", "epiper123");
+        isWifiConnected = true;
+        isAPMode = true;
+        currentIP = WiFi.softAPIP().toString();
     }
+
+    // Register Endpoints
+    server.on("/", HTTP_GET, handleRoot);
+    server.on("/api/data", HTTP_GET, handleApiData);
+    server.on("/api/wifi", HTTP_GET, handleGetWifi);
+    server.on("/api/wifi", HTTP_POST, handlePostWifi);
+    server.on("/api/wifi", HTTP_DELETE, handleDeleteWifi);
+    server.on("/delete", HTTP_DELETE, handleDelete);
+    server.on("/download", HTTP_GET, handleDownload);
+    
+    server.on("/upload", HTTP_POST, []() {
+        server.sendHeader("Location", "/");
+        server.send(303);
+    }, handleFileUpload);
+    
+    server.begin();
 }
 
 void disableWiFi() {
     isWifiConnected = false;
+    isAPMode = false;
     server.stop();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
