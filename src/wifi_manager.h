@@ -9,7 +9,10 @@
 #include <vector>
 #include "system_storage.h"
 
-extern void drawLibraryMenu(bool partialRefresh); 
+// Forward declaration to UIManager inside ui_engine.h
+namespace UIManager {
+    extern void drawLibraryMenu(bool partialRefresh);
+}
 
 WebServer server(80);
 File uploadFile;
@@ -59,7 +62,7 @@ void saveNetworks() {
 }
 
 // ==========================================
-// MATERIAL 3 EXPRESSIVE SPA (Fully Indented)
+// MATERIAL 3 EXPRESSIVE SPA
 // ==========================================
 const char* html_dashboard = R"rawliteral(
 <!DOCTYPE html>
@@ -414,7 +417,7 @@ void handleApiData() {
 void handleChDir() {
     if (server.hasArg("path")) {
         scanDirectory(server.arg("path"));
-        drawLibraryMenu(false);
+        UIManager::drawLibraryMenu(false);
         server.send(200, "text/plain", "OK");
     } else {
         server.send(400, "text/plain", "Missing Path");
@@ -486,7 +489,7 @@ void handleFileUpload() {
         if (uploadFile) {
             uploadFile.close();
             scanDirectory(currentDirectory); 
-            drawLibraryMenu(false); 
+            UIManager::drawLibraryMenu(false); 
         }
     }
 }
@@ -497,7 +500,7 @@ void handleDelete() {
         if (!filename.startsWith("/")) filename = "/" + filename;
         if (SD.remove(filename)) {
             scanDirectory(currentDirectory);
-            drawLibraryMenu(false);
+            UIManager::drawLibraryMenu(false);
             server.send(200, "text/plain", "Deleted");
             return;
         }

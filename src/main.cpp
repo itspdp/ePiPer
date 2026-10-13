@@ -4,8 +4,7 @@
 #include <GxEPD2_BW.h>
 #include <vector>
 #include <Preferences.h>
-#include <time.h> 
-#include <nvs_flash.h> // Required for Hardware Factory Reset
+#include <nvs_flash.h> 
 
 // ==========================================
 // 1. HARDWARE CONFIG
@@ -32,8 +31,10 @@
 #include "splash.h"
 #include "system_storage.h"
 #include "text_engine.h"
+#include "ui_engine.h"
+#include "pagination_engine.h"
+#include "epub_engine.h"
 #include "wifi_manager.h" 
-#include "epub_engine.h" // Phase 8: EPUB Extraction Engine
 
 // ==========================================
 // 3. GLOBAL INSTANTIATIONS
@@ -58,7 +59,6 @@ bool inReadingMode = false;
 int fontSizes[] = {20, 26, 34, 48}; 
 int currentFontIndex = 2; 
 
-// Font-Agnostic Navigation Arrays
 std::vector<uint32_t> paraCache; 
 uint32_t currentByteOffset = 0;
 
@@ -66,304 +66,9 @@ unsigned long menuPressTime = 0, exitPressTime = 0, lastActionTime = 0;
 bool menuPressed = false, menuLongHandled = false;
 bool exitPressed = false, exitLongHandled = false;
 
-#define TOP_BAR_H 20
-#define BOT_BAR_Y 276
-
 // ==========================================
-// 4. FONT-AGNOSTIC PARAGRAPH CACHING
+// 4. ENGINE RENDERERS
 // ==========================================
-bool loadParagraphCache(String cachePath) {
-    File cacheFile = SD.open(cachePath.c_str(), FILE_READ);
-    if (!cacheFile) return false;
-    paraCache.clear();
-    while (cacheFile.available()) {
-        uint32_t offset;
-        if (cacheFile.read((uint8_t*)&offset, sizeof(offset)) == sizeof(offset)) {
-            paraCache.push_back(offset);
-        }
-        yield(); // WATCHDOG SAFETY: Pet the dog during large cache loads
-    }
-    cacheFile.close();
-    return !paraCache.empty();
-}
-
-void buildParagraphCache(String filePath, String cachePath) {
-    display.setFullWindow();
-    display.firstPage();
-    do {
-        display.fillScreen(GxEPD_WHITE);
-        setFontSize(24);
-        drawShapedText("Indexing Document...", 10, 100);
-        setFontSize(16);
-        drawShapedText("Generating a font-agnostic paragraph map.", 10, 150);
-        drawShapedText("This ensures flawless multi-size caching.", 10, 180);
-    } while (display.nextPage());
-
-    paraCache.clear();
-    paraCache.push_back(0);
-    
-    File file = SD.open(filePath.c_str());
-    if (!file) return;
-
-    // Track loops to pet the watchdog efficiently
-    int loops = 0; 
-    while (file.available()) {
-        char c = file.read();
-        if (c == '\n' && file.available()) {
-            paraCache.push_back(file.position());
-        }
-        
-        // WATCHDOG SAFETY: Pet the dog every 10,000 characters
-        if (loops++ % 10000 == 0) yield(); 
-    }
-    file.close();
-
-    File cacheFile = SD.open(cachePath.c_str(), FILE_WRITE);
-    if (cacheFile) {
-        for (uint32_t offset : paraCache) {
-            cacheFile.write((uint8_t*)&offset, sizeof(offset));
-            yield(); // WATCHDOG SAFETY
-        }
-        cacheFile.close();
-    }
-}
-
-// O(1) Reverse Pagination Simulation
-uint32_t calculatePreviousPageOffset(String filePath, uint32_t currentOffset, int activeFontSize) {
-    if (currentOffset == 0 || paraCache.empty()) return 0;
-
-    int paraIndex = 0;
-    for (size_t i = 0; i < paraCache.size(); i++) {
-        if (paraCache[i] >= currentOffset) break;
-        paraIndex = i;
-    }
-
-    // Step back 4 paragraphs to guarantee enough text to fill a preceding screen
-    int startPara = max(0, paraIndex - 4);
-    uint32_t simOffset = paraCache[startPara];
-    
-    uint32_t lastPageStart = simOffset;
-    uint32_t prevPageStart = simOffset;
-
-    File file = SD.open(filePath.c_str());
-    if (!file) return 0;
-    file.seek(simOffset);
-
-    int max_width = 390; 
-    int line_height = activeFontSize + (activeFontSize / 3);
-    int x_pos = 10;
-    int y_pos = TOP_BAR_H + activeFontSize + 6; 
-    bool isNewLine = true;
-    
-    int loops = 0; // Watchdog counter
-
-    while (file.available()) {
-        if (loops++ % 5000 == 0) yield(); // WATCHDOG SAFETY during word-wrap simulation
-
-        if (file.position() >= currentOffset) {
-            file.close();
-            return prevPageStart; 
-        }
-
-        uint32_t tokenStart = file.position();
-        String word = "";
-        bool paragraphBreak = false;
-        bool hasSpace = false;
-
-        while (file.available()) {
-            char c = file.read();
-            if (c == ' ') { hasSpace = true; break; }
-            else if (c == '\n') { paragraphBreak = true; break; }
-            else if (c != '\r') { word += c; }
-        }
-
-        word.replace("**", "");
-        word.replace("__", "");
-
-        if (word.length() == 0 && !paragraphBreak) continue;
-
-        if (isNewLine && word.startsWith("#")) {
-            int hashCount = 0;
-            while (word.length() > hashCount && word[hashCount] == '#') hashCount++;
-            if (hashCount > 0 && hashCount <= 6) {
-                float scaleMap[] = {1.6, 1.4, 1.3, 1.2, 1.1, 1.1}; 
-                line_height = (activeFontSize * scaleMap[hashCount - 1]) * 1.3;
-                word = word.substring(hashCount); 
-            }
-        }
-
-        if (word.length() > 0) {
-            int pure_word_width = getTextWidth(word.c_str());
-            if (x_pos + pure_word_width > max_width && x_pos > 10) {
-                x_pos = 10;
-                y_pos += line_height;
-            }
-            if (y_pos >= BOT_BAR_Y) {
-                prevPageStart = lastPageStart;
-                lastPageStart = tokenStart;
-                x_pos = 10;
-                y_pos = TOP_BAR_H + activeFontSize + 6; 
-            }
-            if (hasSpace) word += " ";
-            x_pos += getTextWidth(word.c_str());
-        }
-
-        isNewLine = false;
-
-        if (paragraphBreak) {
-            x_pos = 10;
-            y_pos += line_height;
-            isNewLine = true;
-            line_height = activeFontSize + (activeFontSize / 3);
-            if (y_pos >= BOT_BAR_Y) {
-                if (file.available()) {
-                    prevPageStart = lastPageStart;
-                    lastPageStart = file.position();
-                }
-                x_pos = 10;
-                y_pos = TOP_BAR_H + activeFontSize + 6; 
-            }
-        }
-    }
-    file.close();
-    return prevPageStart;
-}
-
-// ==========================================
-// 5. OS UI MANAGER NAMESPACE
-// ==========================================
-namespace UIManager {
-    String currentTime = "12:00 PM"; 
-    bool isCharging() { return true; } 
-    int getBatteryPercentage() { return 100; } 
-
-    void updateInternalClock() {
-        struct tm timeinfo;
-        if (getLocalTime(&timeinfo, 10)) { 
-            char timeBuf[10];
-            strftime(timeBuf, sizeof(timeBuf), "%I:%M %p", &timeinfo);
-            currentTime = String(timeBuf);
-        } else {
-            unsigned long totalMinutes = millis() / 60000;
-            int hours = (12 + (totalMinutes / 60)) % 12;
-            if (hours == 0) hours = 12;
-            int mins = totalMinutes % 60;
-            char timeBuf[10];
-            snprintf(timeBuf, sizeof(timeBuf), "%d:%02d %s", hours, mins, (millis() % 86400000 < 43200000) ? "PM" : "AM");
-            currentTime = String(timeBuf);
-        }
-    }
-
-    void drawTopBar() {
-        display.fillRect(0, 0, 400, TOP_BAR_H, GxEPD_BLACK); 
-        setFontSize(14); 
-        
-        String wifiStr;
-        if (isAPMode) wifiStr = "AP: " + currentIP;
-        else if (isWifiConnected) wifiStr = currentIP;
-        else wifiStr = "Wi-Fi: OFF";
-        
-        drawShapedText(wifiStr.c_str(), 10, 15, GxEPD_WHITE);
-
-        updateInternalClock();
-        String battStr = isCharging() ? "[USB]" : "[" + String(getBatteryPercentage()) + "%]";
-        String rightHUD = battStr + "  " + currentTime;
-        
-        int hudWidth = getTextWidth(rightHUD.c_str());
-        drawShapedText(rightHUD.c_str(), 390 - hudWidth, 15, GxEPD_WHITE);
-    }
-
-    void drawBottomBar(String title, int percent) {
-        display.fillRect(0, BOT_BAR_Y, 400, 24, GxEPD_BLACK); 
-        setFontSize(18); 
-        
-        title.replace(".txt", "");
-        title.replace(".TXT", "");
-        title.replace(".md", "");
-        title.replace(".MD", "");
-        title.replace(".epub", "");
-        title.replace(".EPUB", "");
-
-        if (title.length() > 22) title = title.substring(0, 19) + "...";
-        drawShapedText(title.c_str(), 10, 294, GxEPD_WHITE);
-
-        String progress = String(percent) + "%";
-        int progWidth = getTextWidth(progress.c_str());
-        drawShapedText(progress.c_str(), 390 - progWidth, 294, GxEPD_WHITE);
-    }
-}
-
-// ==========================================
-// 6. ENGINE RENDERERS
-// ==========================================
-void showBootScreen() {
-    display.setFullWindow();
-    display.setRotation(0); 
-    display.firstPage();
-    do {
-        display.fillScreen(GxEPD_WHITE);
-        display.drawBitmap((400 - LOGO_WIDTH) / 2, (300 - LOGO_HEIGHT) / 2, epipar_pi_logo, LOGO_WIDTH, LOGO_HEIGHT, GxEPD_BLACK);
-    } while (display.nextPage());
-}
-
-void drawLibraryMenu(bool partialRefresh = false) {
-    display.setRotation(0);
-    if (partialRefresh) display.setPartialWindow(0, TOP_BAR_H, 400, 300 - TOP_BAR_H); 
-    else display.setFullWindow();
-    
-    display.firstPage();
-    do {
-        display.fillScreen(GxEPD_WHITE);
-        if (!partialRefresh) UIManager::drawTopBar();
-
-        setFontSize(24);
-        display.fillRect(0, TOP_BAR_H, 400, 36, GxEPD_WHITE);
-        display.drawFastHLine(0, TOP_BAR_H + 36, 400, GxEPD_BLACK);
-        
-        String pathTitle = currentDirectory == "/" ? "Local Storage (SD)" : currentDirectory;
-        if (pathTitle.length() > 25) pathTitle = "..." + pathTitle.substring(pathTitle.length() - 22);
-        drawShapedText(pathTitle.c_str(), 10, TOP_BAR_H + 24, GxEPD_BLACK);
-        
-        if (fileList.empty()) {
-            drawShapedText("Folder is empty.", 10, 110);
-            continue;
-        }
-
-        int visibleItems = 6;
-        int startIndex = 0;
-        if (currentSelection >= visibleItems) startIndex = currentSelection - visibleItems + 1; 
-
-        for (int i = startIndex; i < (int)fileList.size() && i < startIndex + visibleItems; i++) {
-            int y_pos = 90 + ((i - startIndex) * 34); 
-            
-            String displayName = fileList[i].name;
-            if (fileList[i].isDir && displayName != "[..] UP") displayName = "[" + displayName + "]";
-            else {
-                displayName.replace(".txt", "");
-                displayName.replace(".TXT", "");
-                displayName.replace(".md", "");
-                displayName.replace(".MD", "");
-                displayName.replace(".epub", "");
-                displayName.replace(".EPUB", "");
-            }
-
-            if (i == currentSelection) {
-                display.fillRoundRect(5, y_pos - 24, 380, 32, 4, GxEPD_BLACK);
-                drawShapedText(displayName.c_str(), 15, y_pos - 2, GxEPD_WHITE);
-            } else {
-                drawShapedText(displayName.c_str(), 15, y_pos - 2, GxEPD_BLACK);
-            }
-        }
-        
-        if (fileList.size() > visibleItems) {
-            int barHeight = max(20, (230 * visibleItems) / (int)fileList.size());
-            int barY = 65 + ((currentSelection * (230 - barHeight)) / (fileList.size() - 1));
-            display.drawFastVLine(395, 60, 240, GxEPD_BLACK); 
-            display.fillRoundRect(392, barY, 6, barHeight, 3, GxEPD_BLACK); 
-        }
-    } while (display.nextPage());
-}
-
 void renderPage(String targetFilePath) {
     int activeFontSize = fontSizes[currentFontIndex];
     uint32_t nextByteOffset = currentByteOffset;
@@ -386,11 +91,10 @@ void renderPage(String targetFilePath) {
             int x_pos = 10;
             int y_pos = TOP_BAR_H + activeFontSize + 6; 
             bool isNewLine = true;
-            
-            int loops = 0; // Watchdog counter
+            int loops = 0; 
             
             while (file.available()) {
-                if (loops++ % 5000 == 0) yield(); // WATCHDOG SAFETY during active reading render
+                if (loops++ % 5000 == 0) yield(); 
 
                 uint32_t tokenStart = file.position();
                 String word = "";
@@ -404,9 +108,7 @@ void renderPage(String targetFilePath) {
                     else if (c != '\r') { word += c; }
                 }
 
-                word.replace("**", "");
-                word.replace("__", "");
-
+                word.replace("**", ""); word.replace("__", "");
                 if (word.length() == 0 && !paragraphBreak) continue;
 
                 if (isNewLine && word.startsWith("#")) {
@@ -467,45 +169,31 @@ void openBook() {
 
     String filePath = fileList[currentSelection].fullPath;
     String cleanName = fileList[currentSelection].name;
-    cleanName.replace(".txt", "");
-    cleanName.replace(".md", "");
-    cleanName.replace(".epub", "");
-    cleanName.replace(".EPUB", "");
+    cleanName.replace(".txt", ""); cleanName.replace(".md", "");
+    cleanName.replace(".epub", ""); cleanName.replace(".EPUB", "");
     
-    // If it's an EPUB, we target the hidden TXT extraction on the SD Card
     String targetRenderPath = filePath;
-
     if (!SD.exists("/cache")) SD.mkdir("/cache");
 
     if (filePath.endsWith(".epub") || filePath.endsWith(".EPUB")) {
         targetRenderPath = "/cache/" + cleanName + "_epub.txt";
         
-        // Only unzip if the text cache doesn't already exist
         if (!SD.exists(targetRenderPath.c_str())) {
             display.setFullWindow();
             display.firstPage();
-            do {
-                display.fillScreen(GxEPD_WHITE);
-                setFontSize(24);
-                drawShapedText("Extracting EPUB Archive...", 10, 100);
-                setFontSize(16);
-                drawShapedText("Unzipping HTML and stripping web tags.", 10, 150);
-                drawShapedText("This happens only ONCE per book.", 10, 180);
-            } while (display.nextPage());
+            do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
 
             if (!convertEpubToTxt(filePath, targetRenderPath)) {
-                // Failsafe if ZIP is corrupt
                 inReadingMode = false;
-                drawLibraryMenu(false);
+                UIManager::drawLibraryMenu(false);
                 return;
             }
         }
     }
 
     String cachePath = "/cache/" + cleanName + "_para.idx";
-
     if (!loadParagraphCache(cachePath)) {
-        buildParagraphCache(targetRenderPath, cachePath); // Pass targetRenderPath to handle both standard and EPUB files cleanly!
+        buildParagraphCache(targetRenderPath, cachePath); 
     }
     
     currentByteOffset = prefs.getUInt("pageByte", 0);
@@ -513,29 +201,23 @@ void openBook() {
 }
 
 // ==========================================
-// 7. LIFECYCLE
+// 5. LIFECYCLE
 // ==========================================
 void setup() {
     Serial.begin(115200);
     
-    // ----------------------------------------------------
     // HARDWARE FACTORY RESET (HOLD EXIT ON BOOT)
-    // ----------------------------------------------------
     pinMode(BTN_EXIT, INPUT_PULLUP);
-    delay(100); // Debounce physical boot button hold
+    delay(100); 
     if (digitalRead(BTN_EXIT) == LOW) {
-        Serial.println("FACTORY RESET INITIATED.");
-        
-        nvs_flash_erase(); // Nuke the bookmark partition
+        nvs_flash_erase(); 
         nvs_flash_init();
         
         pinMode(EPD_PWR, OUTPUT);
         digitalWrite(EPD_PWR, HIGH); 
         SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, EPD_CS);
         display.init(115200, true, 2, false);
-        display.setFullWindow();
-        display.firstPage();
-        do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
+        UIManager::drawFullscreenMessage("Factory Reset", "Memory Wiped. Please Reboot.");
 
         if (SD.begin(SD_CS, sdSPI, 4000000)) {
             File cacheDir = SD.open("/cache");
@@ -550,14 +232,10 @@ void setup() {
                 cacheDir.close();
             }
         }
-        
-        Serial.println("RESET COMPLETE. PLEASE REBOOT.");
-        while(true) delay(100); // Lock device until power cycle
+        while(true) delay(100); 
     }
-    // ----------------------------------------------------
 
     prefs.begin("epiper", false);
-    
     pinMode(BTN_UP, INPUT_PULLUP);
     pinMode(BTN_DOWN, INPUT_PULLUP);
     pinMode(BTN_SELECT, INPUT_PULLUP);
@@ -568,7 +246,14 @@ void setup() {
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, EPD_CS);
     display.init(115200, true, 2, false);
     
-    showBootScreen();
+    // Boot Sequence
+    display.setFullWindow();
+    display.setRotation(0); 
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawBitmap((400 - LOGO_WIDTH) / 2, (300 - LOGO_HEIGHT) / 2, epipar_pi_logo, LOGO_WIDTH, LOGO_HEIGHT, GxEPD_BLACK);
+    } while (display.nextPage());
     
     if (mountSDCard() && initRawEngine()) {
         scanDirectory("/");
@@ -583,7 +268,7 @@ void setup() {
                 }
             }
         }
-        drawLibraryMenu(false); 
+        UIManager::drawLibraryMenu(false); 
     }
 }
 
@@ -609,7 +294,7 @@ void loop() {
             } else if (!fileList.empty()) {
                 currentSelection--;
                 if (currentSelection < 0) currentSelection = fileList.size() - 1;
-                drawLibraryMenu(true);
+                UIManager::drawLibraryMenu(true);
             }
         }
         
@@ -627,7 +312,7 @@ void loop() {
             } else if (!fileList.empty()) {
                 currentSelection++;
                 if (currentSelection >= (int)fileList.size()) currentSelection = 0;
-                drawLibraryMenu(true);
+                UIManager::drawLibraryMenu(true);
             }
         }
         
@@ -637,7 +322,7 @@ void loop() {
                 if (fileList[currentSelection].isDir) {
                     scanDirectory(fileList[currentSelection].fullPath);
                     currentSelection = 0;
-                    drawLibraryMenu(false);
+                    UIManager::drawLibraryMenu(false);
                 } else {
                     currentByteOffset = 0; 
                     openBook();
@@ -656,14 +341,10 @@ void loop() {
             if (isWifiConnected) {
                 disableWiFi();
             } else {
-                display.fillRect(0, 0, 400, TOP_BAR_H, GxEPD_BLACK);
-                setFontSize(14);
-                drawShapedText("Connecting to Wi-Fi...", 10, 15, GxEPD_WHITE);
-                display.setPartialWindow(0, 0, 400, TOP_BAR_H);
-                display.nextPage(); 
+                UIManager::drawFullscreenMessage("Wi-Fi Setup", "Connecting to Network...");
                 initWiFi(); 
             }
-            if (!inReadingMode) drawLibraryMenu(false);
+            if (!inReadingMode) UIManager::drawLibraryMenu(false);
             else {
                 String targetRenderPath = fileList[currentSelection].fullPath;
                 if (targetRenderPath.endsWith(".epub") || targetRenderPath.endsWith(".EPUB")) {
@@ -700,6 +381,9 @@ void loop() {
         }
     }
 
+    // ==========================================
+    // BUG FIX: O(1) BIDIRECTIONAL SCROLLING
+    // ==========================================
     if (digitalRead(BTN_EXIT) == LOW) {
         if (!exitPressed) {
             exitPressTime = currentMillis;
@@ -709,9 +393,23 @@ void loop() {
             exitLongHandled = true;
             
             if (inReadingMode) {
+                String targetRenderPath = fileList[currentSelection].fullPath;
+                if (targetRenderPath.endsWith(".epub") || targetRenderPath.endsWith(".EPUB")) {
+                    String cleanName = fileList[currentSelection].name;
+                    cleanName.replace(".epub", ""); cleanName.replace(".EPUB", "");
+                    targetRenderPath = "/cache/" + cleanName + "_epub.txt";
+                }
+
                 if (currentByteOffset == 0) {
-                    currentByteOffset = paraCache.empty() ? 0 : paraCache.back();
+                    // JUMP TO BOTTOM: Calculate exact start of the final page
+                    if (!paraCache.empty()) {
+                        uint32_t endByte = paraCache.back();
+                        currentByteOffset = calculatePreviousPageOffset(targetRenderPath, endByte, fontSizes[currentFontIndex]);
+                    } else {
+                        currentByteOffset = 0;
+                    }
                 } else {
+                    // JUMP TO TOP
                     currentByteOffset = 0; 
                 }
                 prefs.putUInt("pageByte", currentByteOffset);
@@ -720,18 +418,12 @@ void loop() {
                 display.firstPage();
                 do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
                 
-                String targetRenderPath = fileList[currentSelection].fullPath;
-                if (targetRenderPath.endsWith(".epub") || targetRenderPath.endsWith(".EPUB")) {
-                    String cleanName = fileList[currentSelection].name;
-                    cleanName.replace(".epub", ""); cleanName.replace(".EPUB", "");
-                    targetRenderPath = "/cache/" + cleanName + "_epub.txt";
-                }
                 renderPage(targetRenderPath);
             } else {
                 display.setFullWindow();
                 display.firstPage();
                 do { display.fillScreen(GxEPD_BLACK); } while (display.nextPage());
-                drawLibraryMenu(false);
+                UIManager::drawLibraryMenu(false);
             }
         }
     } else {
@@ -741,7 +433,7 @@ void loop() {
                     inReadingMode = false;
                     prefs.putString("lastBook", ""); 
                     scanDirectory(currentDirectory); 
-                    drawLibraryMenu(false); 
+                    UIManager::drawLibraryMenu(false); 
                 }
             }
             exitPressed = false;
