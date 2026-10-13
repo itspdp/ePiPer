@@ -5,9 +5,10 @@
 #include <vector>
 #include <Preferences.h>
 #include <time.h> 
+#include <nvs_flash.h> // Required for Hardware Factory Reset
 
 // ==========================================
-// 1. HARDWARE DEFINITION
+// 1. HARDWARE CONFIG
 // ==========================================
 #define EPD_PWR       7
 #define EPD_CS        45
@@ -32,6 +33,7 @@
 #include "system_storage.h"
 #include "text_engine.h"
 #include "wifi_manager.h" 
+#include "epub_engine.h" // Phase 8: EPUB Extraction Engine
 
 // ==========================================
 // 3. GLOBAL INSTANTIATIONS
@@ -42,7 +44,9 @@ GxEPD2_BW<GxEPD2_420_SE0420NQ04, GxEPD2_420_SE0420NQ04::HEIGHT> display(
 SPIClass sdSPI(FSPI);
 Preferences prefs;
 
-std::vector<String> bookList;
+std::vector<FileNode> fileList;
+String currentDirectory = "/";
+
 uint8_t* font_buffer = nullptr;
 FT_Library ft_library;
 FT_Face ft_face;
@@ -54,75 +58,114 @@ bool inReadingMode = false;
 int fontSizes[] = {20, 26, 34, 48}; 
 int currentFontIndex = 2; 
 
-std::vector<uint32_t> pageOffsets;
-int currentPage = 0;
+// Font-Agnostic Navigation Arrays
+std::vector<uint32_t> paraCache; 
+uint32_t currentByteOffset = 0;
 
-unsigned long menuPressTime = 0;
-bool menuPressed = false;
-bool menuLongHandled = false;
-
-unsigned long exitPressTime = 0;
-bool exitPressed = false;
-bool exitLongHandled = false;
-
-unsigned long lastActionTime = 0; 
+unsigned long menuPressTime = 0, exitPressTime = 0, lastActionTime = 0;
+bool menuPressed = false, menuLongHandled = false;
+bool exitPressed = false, exitLongHandled = false;
 
 #define TOP_BAR_H 20
 #define BOT_BAR_Y 276
 
 // ==========================================
-// 4. THE SD CACHING ENGINE
+// 4. FONT-AGNOSTIC PARAGRAPH CACHING
 // ==========================================
-bool loadCache(String cachePath) {
+bool loadParagraphCache(String cachePath) {
     File cacheFile = SD.open(cachePath.c_str(), FILE_READ);
     if (!cacheFile) return false;
-    pageOffsets.clear();
+    paraCache.clear();
     while (cacheFile.available()) {
         uint32_t offset;
         if (cacheFile.read((uint8_t*)&offset, sizeof(offset)) == sizeof(offset)) {
-            pageOffsets.push_back(offset);
+            paraCache.push_back(offset);
         }
+        yield(); // WATCHDOG SAFETY: Pet the dog during large cache loads
     }
     cacheFile.close();
-    return !pageOffsets.empty();
+    return !paraCache.empty();
 }
 
-void saveCache(String cachePath) {
-    File cacheFile = SD.open(cachePath.c_str(), FILE_WRITE);
-    if (cacheFile) {
-        for (uint32_t offset : pageOffsets) {
-            cacheFile.write((uint8_t*)&offset, sizeof(offset));
-        }
-        cacheFile.close();
-    }
-}
-
-void buildCache(String filePath, String cachePath, int activeFontSize) {
+void buildParagraphCache(String filePath, String cachePath) {
     display.setFullWindow();
     display.firstPage();
     do {
         display.fillScreen(GxEPD_WHITE);
         setFontSize(24);
-        drawShapedText("Paginating Document...", 10, 100);
+        drawShapedText("Indexing Document...", 10, 100);
         setFontSize(16);
-        drawShapedText("Caching precise line-breaks to SD Card.", 10, 150);
-        drawShapedText("This ensures flawless reverse-scrolling.", 10, 180);
+        drawShapedText("Generating a font-agnostic paragraph map.", 10, 150);
+        drawShapedText("This ensures flawless multi-size caching.", 10, 180);
     } while (display.nextPage());
 
-    pageOffsets.clear();
-    pageOffsets.push_back(0);
+    paraCache.clear();
+    paraCache.push_back(0);
     
     File file = SD.open(filePath.c_str());
     if (!file) return;
+
+    // Track loops to pet the watchdog efficiently
+    int loops = 0; 
+    while (file.available()) {
+        char c = file.read();
+        if (c == '\n' && file.available()) {
+            paraCache.push_back(file.position());
+        }
+        
+        // WATCHDOG SAFETY: Pet the dog every 10,000 characters
+        if (loops++ % 10000 == 0) yield(); 
+    }
+    file.close();
+
+    File cacheFile = SD.open(cachePath.c_str(), FILE_WRITE);
+    if (cacheFile) {
+        for (uint32_t offset : paraCache) {
+            cacheFile.write((uint8_t*)&offset, sizeof(offset));
+            yield(); // WATCHDOG SAFETY
+        }
+        cacheFile.close();
+    }
+}
+
+// O(1) Reverse Pagination Simulation
+uint32_t calculatePreviousPageOffset(String filePath, uint32_t currentOffset, int activeFontSize) {
+    if (currentOffset == 0 || paraCache.empty()) return 0;
+
+    int paraIndex = 0;
+    for (size_t i = 0; i < paraCache.size(); i++) {
+        if (paraCache[i] >= currentOffset) break;
+        paraIndex = i;
+    }
+
+    // Step back 4 paragraphs to guarantee enough text to fill a preceding screen
+    int startPara = max(0, paraIndex - 4);
+    uint32_t simOffset = paraCache[startPara];
+    
+    uint32_t lastPageStart = simOffset;
+    uint32_t prevPageStart = simOffset;
+
+    File file = SD.open(filePath.c_str());
+    if (!file) return 0;
+    file.seek(simOffset);
 
     int max_width = 390; 
     int line_height = activeFontSize + (activeFontSize / 3);
     int x_pos = 10;
     int y_pos = TOP_BAR_H + activeFontSize + 6; 
     bool isNewLine = true;
+    
+    int loops = 0; // Watchdog counter
 
     while (file.available()) {
-        uint32_t currentOffset = file.position();
+        if (loops++ % 5000 == 0) yield(); // WATCHDOG SAFETY during word-wrap simulation
+
+        if (file.position() >= currentOffset) {
+            file.close();
+            return prevPageStart; 
+        }
+
+        uint32_t tokenStart = file.position();
         String word = "";
         bool paragraphBreak = false;
         bool hasSpace = false;
@@ -144,27 +187,23 @@ void buildCache(String filePath, String cachePath, int activeFontSize) {
             while (word.length() > hashCount && word[hashCount] == '#') hashCount++;
             if (hashCount > 0 && hashCount <= 6) {
                 float scaleMap[] = {1.6, 1.4, 1.3, 1.2, 1.1, 1.1}; 
-                int scaledSize = activeFontSize * scaleMap[hashCount - 1];
-                setFontSize(scaledSize);
-                line_height = scaledSize * 1.3;
+                line_height = (activeFontSize * scaleMap[hashCount - 1]) * 1.3;
                 word = word.substring(hashCount); 
             }
         }
 
         if (word.length() > 0) {
             int pure_word_width = getTextWidth(word.c_str());
-            
             if (x_pos + pure_word_width > max_width && x_pos > 10) {
                 x_pos = 10;
                 y_pos += line_height;
             }
-            
             if (y_pos >= BOT_BAR_Y) {
-                pageOffsets.push_back(currentOffset);
+                prevPageStart = lastPageStart;
+                lastPageStart = tokenStart;
                 x_pos = 10;
                 y_pos = TOP_BAR_H + activeFontSize + 6; 
             }
-            
             if (hasSpace) word += " ";
             x_pos += getTextWidth(word.c_str());
         }
@@ -175,19 +214,19 @@ void buildCache(String filePath, String cachePath, int activeFontSize) {
             x_pos = 10;
             y_pos += line_height;
             isNewLine = true;
-            setFontSize(activeFontSize); 
             line_height = activeFontSize + (activeFontSize / 3);
-
             if (y_pos >= BOT_BAR_Y) {
-                if (file.available()) pageOffsets.push_back(file.position());
+                if (file.available()) {
+                    prevPageStart = lastPageStart;
+                    lastPageStart = file.position();
+                }
                 x_pos = 10;
                 y_pos = TOP_BAR_H + activeFontSize + 6; 
             }
         }
     }
     file.close();
-    saveCache(cachePath);
-    setFontSize(activeFontSize); 
+    return prevPageStart;
 }
 
 // ==========================================
@@ -219,7 +258,6 @@ namespace UIManager {
         display.fillRect(0, 0, 400, TOP_BAR_H, GxEPD_BLACK); 
         setFontSize(14); 
         
-        // Indicate if we are connected or broadcasting a fallback Access Point
         String wifiStr;
         if (isAPMode) wifiStr = "AP: " + currentIP;
         else if (isWifiConnected) wifiStr = currentIP;
@@ -235,7 +273,7 @@ namespace UIManager {
         drawShapedText(rightHUD.c_str(), 390 - hudWidth, 15, GxEPD_WHITE);
     }
 
-    void drawBottomBar(String title, int currentPg, int totalPg) {
+    void drawBottomBar(String title, int percent) {
         display.fillRect(0, BOT_BAR_Y, 400, 24, GxEPD_BLACK); 
         setFontSize(18); 
         
@@ -249,7 +287,7 @@ namespace UIManager {
         if (title.length() > 22) title = title.substring(0, 19) + "...";
         drawShapedText(title.c_str(), 10, 294, GxEPD_WHITE);
 
-        String progress = String(currentPg + 1) + " / " + String(totalPg);
+        String progress = String(percent) + "%";
         int progWidth = getTextWidth(progress.c_str());
         drawShapedText(progress.c_str(), 390 - progWidth, 294, GxEPD_WHITE);
     }
@@ -276,16 +314,18 @@ void drawLibraryMenu(bool partialRefresh = false) {
     display.firstPage();
     do {
         display.fillScreen(GxEPD_WHITE);
-        
         if (!partialRefresh) UIManager::drawTopBar();
 
         setFontSize(24);
         display.fillRect(0, TOP_BAR_H, 400, 36, GxEPD_WHITE);
         display.drawFastHLine(0, TOP_BAR_H + 36, 400, GxEPD_BLACK);
-        drawShapedText("Local Storage (SD)", 10, TOP_BAR_H + 24, GxEPD_BLACK);
         
-        if (bookList.empty()) {
-            drawShapedText("No books found on SD.", 10, 110);
+        String pathTitle = currentDirectory == "/" ? "Local Storage (SD)" : currentDirectory;
+        if (pathTitle.length() > 25) pathTitle = "..." + pathTitle.substring(pathTitle.length() - 22);
+        drawShapedText(pathTitle.c_str(), 10, TOP_BAR_H + 24, GxEPD_BLACK);
+        
+        if (fileList.empty()) {
+            drawShapedText("Folder is empty.", 10, 110);
             continue;
         }
 
@@ -293,16 +333,19 @@ void drawLibraryMenu(bool partialRefresh = false) {
         int startIndex = 0;
         if (currentSelection >= visibleItems) startIndex = currentSelection - visibleItems + 1; 
 
-        for (int i = startIndex; i < (int)bookList.size() && i < startIndex + visibleItems; i++) {
+        for (int i = startIndex; i < (int)fileList.size() && i < startIndex + visibleItems; i++) {
             int y_pos = 90 + ((i - startIndex) * 34); 
             
-            String displayName = bookList[i];
-            displayName.replace(".txt", "");
-            displayName.replace(".TXT", "");
-            displayName.replace(".md", "");
-            displayName.replace(".MD", "");
-            displayName.replace(".epub", "");
-            displayName.replace(".EPUB", "");
+            String displayName = fileList[i].name;
+            if (fileList[i].isDir && displayName != "[..] UP") displayName = "[" + displayName + "]";
+            else {
+                displayName.replace(".txt", "");
+                displayName.replace(".TXT", "");
+                displayName.replace(".md", "");
+                displayName.replace(".MD", "");
+                displayName.replace(".epub", "");
+                displayName.replace(".EPUB", "");
+            }
 
             if (i == currentSelection) {
                 display.fillRoundRect(5, y_pos - 24, 380, 32, 4, GxEPD_BLACK);
@@ -312,38 +355,19 @@ void drawLibraryMenu(bool partialRefresh = false) {
             }
         }
         
-        if (bookList.size() > visibleItems) {
-            int barHeight = max(20, (230 * visibleItems) / (int)bookList.size());
-            int barY = 65 + ((currentSelection * (230 - barHeight)) / (bookList.size() - 1));
+        if (fileList.size() > visibleItems) {
+            int barHeight = max(20, (230 * visibleItems) / (int)fileList.size());
+            int barY = 65 + ((currentSelection * (230 - barHeight)) / (fileList.size() - 1));
             display.drawFastVLine(395, 60, 240, GxEPD_BLACK); 
             display.fillRoundRect(392, barY, 6, barHeight, 3, GxEPD_BLACK); 
         }
     } while (display.nextPage());
 }
 
-void renderPage() {
-    String filePath = bookList[currentSelection];
-    if (!filePath.startsWith("/")) filePath = "/" + filePath;
-
-    if (filePath.endsWith(".epub") || filePath.endsWith(".EPUB")) {
-        display.setFullWindow();
-        display.firstPage();
-        do {
-            display.fillScreen(GxEPD_WHITE);
-            UIManager::drawTopBar();
-            setFontSize(24);
-            drawShapedText("EPUB Engine Required", 10, 80);
-            setFontSize(16);
-            drawShapedText("EPUBs are compressed ZIP archives.", 10, 120);
-            drawShapedText("We must add a decompression library to", 10, 150);
-            drawShapedText("platformio.ini before extracting the text.", 10, 180);
-            setFontSize(20);
-            drawShapedText("Press EXIT to return.", 10, 240);
-        } while (display.nextPage());
-        return;
-    }
-
+void renderPage(String targetFilePath) {
     int activeFontSize = fontSizes[currentFontIndex];
+    uint32_t nextByteOffset = currentByteOffset;
+    uint32_t fileSize = 1;
     
     display.setFullWindow();
     display.firstPage();
@@ -352,9 +376,10 @@ void renderPage() {
         UIManager::drawTopBar();
         setFontSize(activeFontSize);
         
-        File file = SD.open(filePath.c_str());
+        File file = SD.open(targetFilePath.c_str());
         if (file) {
-            file.seek(pageOffsets[currentPage]);
+            fileSize = file.size();
+            file.seek(currentByteOffset);
 
             int max_width = 390; 
             int line_height = activeFontSize + (activeFontSize / 3);
@@ -362,7 +387,12 @@ void renderPage() {
             int y_pos = TOP_BAR_H + activeFontSize + 6; 
             bool isNewLine = true;
             
+            int loops = 0; // Watchdog counter
+            
             while (file.available()) {
+                if (loops++ % 5000 == 0) yield(); // WATCHDOG SAFETY during active reading render
+
+                uint32_t tokenStart = file.position();
                 String word = "";
                 bool paragraphBreak = false;
                 bool hasSpace = false;
@@ -397,8 +427,10 @@ void renderPage() {
                         x_pos = 10;
                         y_pos += line_height;
                     }
-                    if (y_pos >= BOT_BAR_Y) break; 
-                    
+                    if (y_pos >= BOT_BAR_Y) {
+                        nextByteOffset = tokenStart;
+                        break; 
+                    }
                     if (hasSpace) word += " ";
                     drawShapedText(word.c_str(), x_pos, y_pos);
                     x_pos += getTextWidth(word.c_str()); 
@@ -412,44 +444,72 @@ void renderPage() {
                     isNewLine = true;
                     setFontSize(activeFontSize); 
                     line_height = activeFontSize + (activeFontSize / 3);
-                    if (y_pos >= BOT_BAR_Y) break; 
+                    if (y_pos >= BOT_BAR_Y) {
+                        nextByteOffset = file.position();
+                        break; 
+                    }
                 }
             }
+            if (!file.available()) nextByteOffset = file.position(); 
             
-            UIManager::drawBottomBar(bookList[currentSelection], currentPage, pageOffsets.size());
+            int percent = (currentByteOffset * 100) / fileSize;
+            UIManager::drawBottomBar(fileList[currentSelection].name, percent);
             file.close();
         }
     } while (display.nextPage());
+
+    if (nextByteOffset > currentByteOffset) currentByteOffset = nextByteOffset;
 }
 
 void openBook() {
     inReadingMode = true;
-    prefs.putInt("bookIndex", currentSelection);
+    prefs.putString("lastBook", fileList[currentSelection].fullPath);
 
-    String filePath = bookList[currentSelection];
-    if (!filePath.startsWith("/")) filePath = "/" + filePath;
-
-    if (filePath.endsWith(".epub") || filePath.endsWith(".EPUB")) {
-        renderPage();
-        return;
-    }
-
-    String cacheName = bookList[currentSelection];
-    cacheName.replace("/", "_");
-    cacheName.replace(".txt", "");
-    cacheName.replace(".md", "");
-    String cachePath = "/cache/" + cacheName + "_f" + String(currentFontIndex) + ".idx";
+    String filePath = fileList[currentSelection].fullPath;
+    String cleanName = fileList[currentSelection].name;
+    cleanName.replace(".txt", "");
+    cleanName.replace(".md", "");
+    cleanName.replace(".epub", "");
+    cleanName.replace(".EPUB", "");
+    
+    // If it's an EPUB, we target the hidden TXT extraction on the SD Card
+    String targetRenderPath = filePath;
 
     if (!SD.exists("/cache")) SD.mkdir("/cache");
 
-    if (!loadCache(cachePath)) {
-        buildCache(filePath, cachePath, fontSizes[currentFontIndex]);
+    if (filePath.endsWith(".epub") || filePath.endsWith(".EPUB")) {
+        targetRenderPath = "/cache/" + cleanName + "_epub.txt";
+        
+        // Only unzip if the text cache doesn't already exist
+        if (!SD.exists(targetRenderPath.c_str())) {
+            display.setFullWindow();
+            display.firstPage();
+            do {
+                display.fillScreen(GxEPD_WHITE);
+                setFontSize(24);
+                drawShapedText("Extracting EPUB Archive...", 10, 100);
+                setFontSize(16);
+                drawShapedText("Unzipping HTML and stripping web tags.", 10, 150);
+                drawShapedText("This happens only ONCE per book.", 10, 180);
+            } while (display.nextPage());
+
+            if (!convertEpubToTxt(filePath, targetRenderPath)) {
+                // Failsafe if ZIP is corrupt
+                inReadingMode = false;
+                drawLibraryMenu(false);
+                return;
+            }
+        }
     }
 
-    if (currentPage >= (int)pageOffsets.size()) {
-        currentPage = 0;
+    String cachePath = "/cache/" + cleanName + "_para.idx";
+
+    if (!loadParagraphCache(cachePath)) {
+        buildParagraphCache(targetRenderPath, cachePath); // Pass targetRenderPath to handle both standard and EPUB files cleanly!
     }
-    renderPage();
+    
+    currentByteOffset = prefs.getUInt("pageByte", 0);
+    renderPage(targetRenderPath);
 }
 
 // ==========================================
@@ -457,13 +517,51 @@ void openBook() {
 // ==========================================
 void setup() {
     Serial.begin(115200);
+    
+    // ----------------------------------------------------
+    // HARDWARE FACTORY RESET (HOLD EXIT ON BOOT)
+    // ----------------------------------------------------
+    pinMode(BTN_EXIT, INPUT_PULLUP);
+    delay(100); // Debounce physical boot button hold
+    if (digitalRead(BTN_EXIT) == LOW) {
+        Serial.println("FACTORY RESET INITIATED.");
+        
+        nvs_flash_erase(); // Nuke the bookmark partition
+        nvs_flash_init();
+        
+        pinMode(EPD_PWR, OUTPUT);
+        digitalWrite(EPD_PWR, HIGH); 
+        SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, EPD_CS);
+        display.init(115200, true, 2, false);
+        display.setFullWindow();
+        display.firstPage();
+        do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
+
+        if (SD.begin(SD_CS, sdSPI, 4000000)) {
+            File cacheDir = SD.open("/cache");
+            if (cacheDir && cacheDir.isDirectory()) {
+                File file = cacheDir.openNextFile();
+                while(file){
+                    String filepath = String("/cache/") + file.name();
+                    file.close();
+                    SD.remove(filepath.c_str());
+                    file = cacheDir.openNextFile();
+                }
+                cacheDir.close();
+            }
+        }
+        
+        Serial.println("RESET COMPLETE. PLEASE REBOOT.");
+        while(true) delay(100); // Lock device until power cycle
+    }
+    // ----------------------------------------------------
+
     prefs.begin("epiper", false);
     
     pinMode(BTN_UP, INPUT_PULLUP);
     pinMode(BTN_DOWN, INPUT_PULLUP);
     pinMode(BTN_SELECT, INPUT_PULLUP);
     pinMode(BTN_MENU, INPUT_PULLUP);
-    pinMode(BTN_EXIT, INPUT_PULLUP);
 
     pinMode(EPD_PWR, OUTPUT);
     digitalWrite(EPD_PWR, HIGH); 
@@ -473,18 +571,19 @@ void setup() {
     showBootScreen();
     
     if (mountSDCard() && initRawEngine()) {
-        scanForBooks();
+        scanDirectory("/");
         
-        int savedBook = prefs.getInt("bookIndex", -1);
-        uint32_t savedPage = prefs.getUInt("pageIndex", 0);
-        
-        if (savedBook >= 0 && savedBook < (int)bookList.size()) {
-            currentSelection = savedBook;
-            currentPage = savedPage;
-            openBook();
-        } else {
-            drawLibraryMenu(false); 
+        String savedBook = prefs.getString("lastBook", "");
+        if (savedBook != "") {
+            for (size_t i = 0; i < fileList.size(); i++) {
+                if (fileList[i].fullPath == savedBook) {
+                    currentSelection = i;
+                    openBook();
+                    return;
+                }
+            }
         }
+        drawLibraryMenu(false); 
     }
 }
 
@@ -496,14 +595,20 @@ void loop() {
         if (digitalRead(BTN_UP) == LOW) {
             lastActionTime = currentMillis;
             if (inReadingMode) {
-                if (currentPage > 0) {
-                    currentPage--;
-                    prefs.putUInt("pageIndex", currentPage); 
-                    renderPage();
+                if (currentByteOffset > 0) {
+                    String targetRenderPath = fileList[currentSelection].fullPath;
+                    if (targetRenderPath.endsWith(".epub") || targetRenderPath.endsWith(".EPUB")) {
+                        String cleanName = fileList[currentSelection].name;
+                        cleanName.replace(".epub", ""); cleanName.replace(".EPUB", "");
+                        targetRenderPath = "/cache/" + cleanName + "_epub.txt";
+                    }
+                    currentByteOffset = calculatePreviousPageOffset(targetRenderPath, currentByteOffset, fontSizes[currentFontIndex]);
+                    prefs.putUInt("pageByte", currentByteOffset); 
+                    renderPage(targetRenderPath);
                 }
-            } else if (!bookList.empty()) {
+            } else if (!fileList.empty()) {
                 currentSelection--;
-                if (currentSelection < 0) currentSelection = bookList.size() - 1;
+                if (currentSelection < 0) currentSelection = fileList.size() - 1;
                 drawLibraryMenu(true);
             }
         }
@@ -511,26 +616,32 @@ void loop() {
         if (digitalRead(BTN_DOWN) == LOW) {
             lastActionTime = currentMillis;
             if (inReadingMode) {
-                String f = bookList[currentSelection];
-                if (f.endsWith(".epub") || f.endsWith(".EPUB")) return;
-
-                if (currentPage + 1 < (int)pageOffsets.size()) {
-                    currentPage++;
-                    prefs.putUInt("pageIndex", currentPage); 
-                    renderPage();
+                String targetRenderPath = fileList[currentSelection].fullPath;
+                if (targetRenderPath.endsWith(".epub") || targetRenderPath.endsWith(".EPUB")) {
+                    String cleanName = fileList[currentSelection].name;
+                    cleanName.replace(".epub", ""); cleanName.replace(".EPUB", "");
+                    targetRenderPath = "/cache/" + cleanName + "_epub.txt";
                 }
-            } else if (!bookList.empty()) {
+                prefs.putUInt("pageByte", currentByteOffset); 
+                renderPage(targetRenderPath);
+            } else if (!fileList.empty()) {
                 currentSelection++;
-                if (currentSelection >= (int)bookList.size()) currentSelection = 0;
+                if (currentSelection >= (int)fileList.size()) currentSelection = 0;
                 drawLibraryMenu(true);
             }
         }
         
         if (digitalRead(BTN_SELECT) == LOW) {
             lastActionTime = currentMillis;
-            if (!inReadingMode && !bookList.empty()) {
-                currentPage = 0; 
-                openBook();
+            if (!inReadingMode && !fileList.empty()) {
+                if (fileList[currentSelection].isDir) {
+                    scanDirectory(fileList[currentSelection].fullPath);
+                    currentSelection = 0;
+                    drawLibraryMenu(false);
+                } else {
+                    currentByteOffset = 0; 
+                    openBook();
+                }
             }
         }
     }
@@ -550,31 +661,39 @@ void loop() {
                 drawShapedText("Connecting to Wi-Fi...", 10, 15, GxEPD_WHITE);
                 display.setPartialWindow(0, 0, 400, TOP_BAR_H);
                 display.nextPage(); 
-                initWiFi(); // No longer requires hardcoded credentials
+                initWiFi(); 
             }
             if (!inReadingMode) drawLibraryMenu(false);
-            else renderPage();
+            else {
+                String targetRenderPath = fileList[currentSelection].fullPath;
+                if (targetRenderPath.endsWith(".epub") || targetRenderPath.endsWith(".EPUB")) {
+                    String cleanName = fileList[currentSelection].name;
+                    cleanName.replace(".epub", ""); cleanName.replace(".EPUB", "");
+                    targetRenderPath = "/cache/" + cleanName + "_epub.txt";
+                }
+                uint32_t holdByte = currentByteOffset;
+                currentByteOffset = calculatePreviousPageOffset(targetRenderPath, holdByte, fontSizes[currentFontIndex]);
+                renderPage(targetRenderPath);
+            }
         }
     } else {
         if (menuPressed) {
             if (!menuLongHandled && (currentMillis - menuPressTime > 50)) {
                 if (inReadingMode) {
-                    String f = bookList[currentSelection];
-                    if (!f.endsWith(".epub") && !f.endsWith(".EPUB")) {
-                        currentFontIndex++;
-                        if (currentFontIndex > 3) currentFontIndex = 0;
-                        
-                        uint32_t savedOffset = pageOffsets[currentPage];
-                        openBook(); 
-                        
-                        currentPage = 0;
-                        for (int i = 0; i < (int)pageOffsets.size(); i++) {
-                            if (pageOffsets[i] <= savedOffset) currentPage = i;
-                            else break;
-                        }
-                        prefs.putUInt("pageIndex", currentPage);
-                        renderPage(); 
+                    String targetRenderPath = fileList[currentSelection].fullPath;
+                    if (targetRenderPath.endsWith(".epub") || targetRenderPath.endsWith(".EPUB")) {
+                        String cleanName = fileList[currentSelection].name;
+                        cleanName.replace(".epub", ""); cleanName.replace(".EPUB", "");
+                        targetRenderPath = "/cache/" + cleanName + "_epub.txt";
                     }
+                    
+                    currentFontIndex++;
+                    if (currentFontIndex > 3) currentFontIndex = 0;
+                    
+                    uint32_t holdByte = currentByteOffset;
+                    currentByteOffset = calculatePreviousPageOffset(targetRenderPath, holdByte, fontSizes[currentFontIndex]);
+                    prefs.putUInt("pageByte", currentByteOffset);
+                    renderPage(targetRenderPath); 
                 }
             }
             menuPressed = false;
@@ -590,18 +709,24 @@ void loop() {
             exitLongHandled = true;
             
             if (inReadingMode) {
-                if (currentPage == 0) {
-                    currentPage = pageOffsets.size() > 0 ? pageOffsets.size() - 1 : 0;
+                if (currentByteOffset == 0) {
+                    currentByteOffset = paraCache.empty() ? 0 : paraCache.back();
                 } else {
-                    currentPage = 0; 
+                    currentByteOffset = 0; 
                 }
-                prefs.putUInt("pageIndex", currentPage);
+                prefs.putUInt("pageByte", currentByteOffset);
                 
                 display.setFullWindow();
                 display.firstPage();
                 do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
                 
-                renderPage();
+                String targetRenderPath = fileList[currentSelection].fullPath;
+                if (targetRenderPath.endsWith(".epub") || targetRenderPath.endsWith(".EPUB")) {
+                    String cleanName = fileList[currentSelection].name;
+                    cleanName.replace(".epub", ""); cleanName.replace(".EPUB", "");
+                    targetRenderPath = "/cache/" + cleanName + "_epub.txt";
+                }
+                renderPage(targetRenderPath);
             } else {
                 display.setFullWindow();
                 display.firstPage();
@@ -614,7 +739,8 @@ void loop() {
             if (!exitLongHandled && (currentMillis - exitPressTime > 50)) {
                 if (inReadingMode) {
                     inReadingMode = false;
-                    prefs.putInt("bookIndex", -1); 
+                    prefs.putString("lastBook", ""); 
+                    scanDirectory(currentDirectory); 
                     drawLibraryMenu(false); 
                 }
             }
