@@ -4,10 +4,11 @@
 #include <GxEPD2_BW.h>
 #include <vector>
 #include <Preferences.h>
-#include <nvs_flash.h> 
+#include <time.h> 
+#include <nvs_flash.h>
 
 // ==========================================
-// 1. HARDWARE CONFIG
+// 1. HARDWARE CONFIGURATION
 // ==========================================
 #define EPD_PWR       7
 #define EPD_CS        45
@@ -26,18 +27,19 @@
 #define BTN_EXIT      1
 
 // ==========================================
-// 2. MODULAR INCLUDES
+// 2. FOUNDATIONAL DATA STRUCTURES
 // ==========================================
-#include "splash.h"
+// System storage defines FileNode, which is needed by the global variables below.
 #include "system_storage.h"
+
+// Text engine includes FreeType and HarfBuzz headers, which define FT_Library, etc.
 #include "text_engine.h"
-#include "ui_engine.h"
-#include "pagination_engine.h"
-#include "epub_engine.h"
-#include "wifi_manager.h" 
+
+std::vector<FileNode> fileList;
+String currentDirectory = "/";
 
 // ==========================================
-// 3. GLOBAL INSTANTIATIONS
+// 3. GLOBAL STATE DEFINITIONS
 // ==========================================
 GxEPD2_BW<GxEPD2_420_SE0420NQ04, GxEPD2_420_SE0420NQ04::HEIGHT> display(
     GxEPD2_420_SE0420NQ04(EPD_CS, EPD_DC, EPD_RES, EPD_BUSY)
@@ -45,30 +47,50 @@ GxEPD2_BW<GxEPD2_420_SE0420NQ04, GxEPD2_420_SE0420NQ04::HEIGHT> display(
 SPIClass sdSPI(FSPI);
 Preferences prefs;
 
-std::vector<FileNode> fileList;
-String currentDirectory = "/";
-
+// Typography Global Pointers (Types now defined by text_engine.h)
 uint8_t* font_buffer = nullptr;
 FT_Library ft_library;
 FT_Face ft_face;
 hb_font_t *hb_font;
 
+// Reading State
 int currentSelection = 0;
 bool inReadingMode = false;
-
 int fontSizes[] = {20, 26, 34, 48}; 
 int currentFontIndex = 2; 
 
+// Pagination Cache and active read-head
 std::vector<uint32_t> paraCache; 
 uint32_t currentByteOffset = 0;
 
+// Button Debounce Timers
 unsigned long menuPressTime = 0, exitPressTime = 0, lastActionTime = 0;
 bool menuPressed = false, menuLongHandled = false;
 bool exitPressed = false, exitLongHandled = false;
 
 // ==========================================
-// 4. ENGINE RENDERERS
+// 4. ENGINE INCLUDES
 // ==========================================
+// Now that all globals and structs are defined, load the UI and Logic engines
+#include "splash.h"
+#include "ui_engine.h"
+#include "pagination_engine.h"
+#include "epub_engine.h"
+#include "wifi_manager.h" 
+
+// ==========================================
+// 5. CORE RENDERER
+// ==========================================
+void showBootScreen() {
+    display.setFullWindow();
+    display.setRotation(0); 
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawBitmap((400 - LOGO_WIDTH) / 2, (300 - LOGO_HEIGHT) / 2, epipar_pi_logo, LOGO_WIDTH, LOGO_HEIGHT, GxEPD_BLACK);
+    } while (display.nextPage());
+}
+
 void renderPage(String targetFilePath) {
     int activeFontSize = fontSizes[currentFontIndex];
     uint32_t nextByteOffset = currentByteOffset;
@@ -163,6 +185,9 @@ void renderPage(String targetFilePath) {
     if (nextByteOffset > currentByteOffset) currentByteOffset = nextByteOffset;
 }
 
+// ==========================================
+// 6. BOOK INITIALIZER
+// ==========================================
 void openBook() {
     inReadingMode = true;
     prefs.putString("lastBook", fileList[currentSelection].fullPath);
@@ -179,9 +204,13 @@ void openBook() {
         targetRenderPath = "/cache/" + cleanName + "_epub.txt";
         
         if (!SD.exists(targetRenderPath.c_str())) {
-            display.setFullWindow();
+            display.setPartialWindow(0, BOT_BAR_Y, 400, 24);
             display.firstPage();
-            do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
+            do {
+                display.fillRect(0, BOT_BAR_Y, 400, 24, GxEPD_BLACK);
+                setFontSize(18);
+                drawShapedText("Extracting EPUB Archive...", 10, 294, GxEPD_WHITE);
+            } while (display.nextPage());
 
             if (!convertEpubToTxt(filePath, targetRenderPath)) {
                 inReadingMode = false;
@@ -201,7 +230,7 @@ void openBook() {
 }
 
 // ==========================================
-// 5. LIFECYCLE
+// 7. OS LIFECYCLE
 // ==========================================
 void setup() {
     Serial.begin(115200);
@@ -246,14 +275,8 @@ void setup() {
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, EPD_CS);
     display.init(115200, true, 2, false);
     
-    // Boot Sequence
-    display.setFullWindow();
-    display.setRotation(0); 
-    display.firstPage();
-    do {
-        display.fillScreen(GxEPD_WHITE);
-        display.drawBitmap((400 - LOGO_WIDTH) / 2, (300 - LOGO_HEIGHT) / 2, epipar_pi_logo, LOGO_WIDTH, LOGO_HEIGHT, GxEPD_BLACK);
-    } while (display.nextPage());
+    // Fixed: Standard Global Function Call
+    showBootScreen();
     
     if (mountSDCard() && initRawEngine()) {
         scanDirectory("/");
@@ -341,7 +364,11 @@ void loop() {
             if (isWifiConnected) {
                 disableWiFi();
             } else {
-                UIManager::drawFullscreenMessage("Wi-Fi Setup", "Connecting to Network...");
+                display.fillRect(0, 0, 400, TOP_BAR_H, GxEPD_BLACK);
+                setFontSize(14);
+                drawShapedText("Connecting to Wi-Fi...", 10, 15, GxEPD_WHITE);
+                display.setPartialWindow(0, 0, 400, TOP_BAR_H);
+                display.nextPage(); 
                 initWiFi(); 
             }
             if (!inReadingMode) UIManager::drawLibraryMenu(false);
@@ -381,9 +408,6 @@ void loop() {
         }
     }
 
-    // ==========================================
-    // BUG FIX: O(1) BIDIRECTIONAL SCROLLING
-    // ==========================================
     if (digitalRead(BTN_EXIT) == LOW) {
         if (!exitPressed) {
             exitPressTime = currentMillis;
@@ -401,24 +425,18 @@ void loop() {
                 }
 
                 if (currentByteOffset == 0) {
-                    // JUMP TO BOTTOM: Calculate exact start of the final page
-                    if (!paraCache.empty()) {
-                        uint32_t endByte = paraCache.back();
-                        currentByteOffset = calculatePreviousPageOffset(targetRenderPath, endByte, fontSizes[currentFontIndex]);
+                    if (paraCache.size() > 4) {
+                        currentByteOffset = calculatePreviousPageOffset(targetRenderPath, paraCache[paraCache.size() - 4], fontSizes[currentFontIndex]);
                     } else {
                         currentByteOffset = 0;
                     }
                 } else {
-                    // JUMP TO TOP
                     currentByteOffset = 0; 
                 }
+                
                 prefs.putUInt("pageByte", currentByteOffset);
-                
-                display.setFullWindow();
-                display.firstPage();
-                do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
-                
                 renderPage(targetRenderPath);
+                
             } else {
                 display.setFullWindow();
                 display.firstPage();

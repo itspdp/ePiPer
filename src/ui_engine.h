@@ -7,9 +7,15 @@
 #include "text_engine.h"
 #include <time.h> 
 
+// ---------------------------------------------------------
+// UI LAYOUT CONSTANTS
+// ---------------------------------------------------------
 #define TOP_BAR_H 20
 #define BOT_BAR_Y 276
 
+// ---------------------------------------------------------
+// EXTERNAL STATE VARIABLES (Defined in main.cpp)
+// ---------------------------------------------------------
 extern GxEPD2_BW<GxEPD2_420_SE0420NQ04, GxEPD2_420_SE0420NQ04::HEIGHT> display;
 extern std::vector<FileNode> fileList;
 extern String currentDirectory;
@@ -18,18 +24,25 @@ extern bool isWifiConnected;
 extern bool isAPMode;
 extern String currentIP;
 
+// ---------------------------------------------------------
+// UI MANAGER NAMESPACE
+// ---------------------------------------------------------
 namespace UIManager {
     String currentTime = "12:00 PM"; 
-    bool isCharging() { return true; } 
-    int getBatteryPercentage() { return 100; } 
+    
+    // Hardware abstractions for future Battery/Power IC integration
+    inline bool isCharging() { return true; } 
+    inline int getBatteryPercentage() { return 100; } 
 
-    void updateInternalClock() {
+    // Synchronizes with the ESP32 internal RTC (updated via NTP when online)
+    inline void updateInternalClock() {
         struct tm timeinfo;
         if (getLocalTime(&timeinfo, 10)) { 
             char timeBuf[10];
             strftime(timeBuf, sizeof(timeBuf), "%I:%M %p", &timeinfo);
             currentTime = String(timeBuf);
         } else {
+            // Fallback: estimate time based on millis() if NTP failed
             unsigned long totalMinutes = millis() / 60000;
             int hours = (12 + (totalMinutes / 60)) % 12;
             if (hours == 0) hours = 12;
@@ -40,7 +53,8 @@ namespace UIManager {
         }
     }
 
-    void drawTopBar() {
+    // Renders the System Status Header (Wi-Fi, Battery, Time)
+    inline void drawTopBar() {
         display.fillRect(0, 0, 400, TOP_BAR_H, GxEPD_BLACK); 
         setFontSize(14); 
         
@@ -59,10 +73,12 @@ namespace UIManager {
         drawShapedText(rightHUD.c_str(), 390 - hudWidth, 15, GxEPD_WHITE);
     }
 
-    void drawBottomBar(String title, int percent) {
+    // Renders the Reading Progress Footer (Book Title, % Read)
+    inline void drawBottomBar(String title, int percent) {
         display.fillRect(0, BOT_BAR_Y, 400, 24, GxEPD_BLACK); 
         setFontSize(18); 
         
+        // Clean extensions for the UI
         title.replace(".txt", ""); title.replace(".TXT", "");
         title.replace(".md", ""); title.replace(".MD", "");
         title.replace(".epub", ""); title.replace(".EPUB", "");
@@ -75,8 +91,11 @@ namespace UIManager {
         drawShapedText(progress.c_str(), 390 - progWidth, 294, GxEPD_WHITE);
     }
 
-    void drawLibraryMenu(bool partialRefresh = false) {
+    // Renders the Main File Explorer Menu
+    inline void drawLibraryMenu(bool partialRefresh = false) {
         display.setRotation(0);
+        
+        // Use partial refresh for rapid scrolling, full refresh for directory changes
         if (partialRefresh) display.setPartialWindow(0, TOP_BAR_H, 400, 300 - TOP_BAR_H); 
         else display.setFullWindow();
         
@@ -100,6 +119,7 @@ namespace UIManager {
 
             int visibleItems = 6;
             int startIndex = 0;
+            // Scroll logic: keep selection at the bottom of the viewport when moving down
             if (currentSelection >= visibleItems) startIndex = currentSelection - visibleItems + 1; 
 
             for (int i = startIndex; i < (int)fileList.size() && i < startIndex + visibleItems; i++) {
@@ -113,6 +133,7 @@ namespace UIManager {
                     displayName.replace(".epub", ""); displayName.replace(".EPUB", "");
                 }
 
+                // Highlight currently selected item
                 if (i == currentSelection) {
                     display.fillRoundRect(5, y_pos - 24, 380, 32, 4, GxEPD_BLACK);
                     drawShapedText(displayName.c_str(), 15, y_pos - 2, GxEPD_WHITE);
@@ -121,6 +142,7 @@ namespace UIManager {
                 }
             }
             
+            // Draw Scrollbar if list exceeds screen space
             if (fileList.size() > visibleItems) {
                 int barHeight = max(20, (230 * visibleItems) / (int)fileList.size());
                 int barY = 65 + ((currentSelection * (230 - barHeight)) / (fileList.size() - 1));
@@ -130,25 +152,8 @@ namespace UIManager {
         } while (display.nextPage());
     }
 
-    void drawProgressBar(String title, String status, int percent) {
-        display.setPartialWindow(40, 100, 320, 100);
-        display.firstPage();
-        do {
-            display.fillRect(40, 100, 320, 100, GxEPD_WHITE);
-            display.drawRect(40, 100, 320, 100, GxEPD_BLACK);
-            
-            setFontSize(20);
-            drawShapedText(title.c_str(), 50, 125);
-            
-            setFontSize(14);
-            drawShapedText(status.c_str(), 50, 155);
-            
-            display.drawRect(50, 170, 300, 15, GxEPD_BLACK);
-            display.fillRect(50, 170, (300 * percent) / 100, 15, GxEPD_BLACK);
-        } while (display.nextPage());
-    }
-
-    void drawFullscreenMessage(String title, String msg) {
+    // Emergency/Diagnostic Full Screen Interrupter (e.g., Factory Reset UI)
+    inline void drawFullscreenMessage(String title, String msg) {
         display.setFullWindow();
         display.firstPage();
         do {
